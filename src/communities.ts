@@ -247,6 +247,8 @@ export class Collection<K, V> extends Map<K, V> {
 export interface CommunityContext {
   store: CommunityStore;
   onLeave?: (communityId: string) => void;
+  /** Resolves a pubkey to a profile, so members can carry user info. */
+  resolveUser?: (pubkey: string) => Promise<unknown>;
 }
 
 /**
@@ -256,6 +258,8 @@ export interface CommunityContext {
  * description. Do not log one wholesale.
  */
 export class Community {
+  private memberManager?: CommunityMemberManager;
+
   constructor(
     private readonly data: JoinedCommunity,
     private readonly context: CommunityContext,
@@ -306,6 +310,18 @@ export class Community {
     return this.data.announced;
   }
 
+  /**
+   * The members this bot can see — discord.js's `guild.members`, with the
+   * caveat that it is partial. Read {@link CommunityMemberManager} before
+   * showing a count.
+   */
+  public get members(): CommunityMemberManager {
+    if (!this.memberManager) {
+      this.memberManager = new CommunityMemberManager(this, this.context.resolveUser);
+    }
+    return this.memberManager;
+  }
+
   /** The stored record, keys included. */
   public toJSON(): JoinedCommunity {
     return { ...this.data };
@@ -339,6 +355,7 @@ export class CommunityManager {
   constructor(
     private readonly store: CommunityStore,
     private readonly onLeave?: (communityId: string) => void,
+    private readonly resolveUser?: (pubkey: string) => Promise<unknown>,
   ) {}
 
   public get size(): number {
@@ -352,7 +369,11 @@ export class CommunityManager {
     for (const data of all) {
       this.cache.set(
         data.communityId,
-        new Community(data, { store: this.store, onLeave: this.onLeave }),
+        new Community(data, {
+          store: this.store,
+          onLeave: this.onLeave,
+          resolveUser: this.resolveUser,
+        }),
       );
     }
     return this.cache;
@@ -373,7 +394,11 @@ export class CommunityManager {
     if (!data) {
       return undefined;
     }
-    const community = new Community(data, { store: this.store, onLeave: this.onLeave });
+    const community = new Community(data, {
+      store: this.store,
+      onLeave: this.onLeave,
+      resolveUser: this.resolveUser,
+    });
     this.cache.set(communityId, community);
     return community;
   }
@@ -389,5 +414,118 @@ export class CommunityManager {
       this.cache.delete(communityId);
     }
     return left;
+  }
+}
+
+// ── members ──────────────────────────────────────────────────────────────────
+
+/** How the bot came to know about a member. */
+export type MemberSource = 'owner' | 'inviter' | 'observed';
+
+/**
+ * Someone the bot knows to be in a community — the rough equivalent of a
+ * discord.js `GuildMember`.
+ *
+ * `user` is the account's profile; `source` says why the bot believes they are
+ * a member, which matters because the evidence differs in strength: the owner
+ * is proven by the community id itself, an inviter by a verified seal, an
+ * observed member only by having been seen.
+ */
+export interface CommunityMember<TUser = unknown> {
+  /** Public key, hex. */
+  pubkey: string;
+  /** The account's profile, when one has been fetched. */
+  user?: TUser;
+  source: MemberSource;
+  /** True for the account the community id self-certifies as owner. */
+  isOwner: boolean;
+}
+
+/**
+ * The members of a community that this bot can actually see.
+ *
+ * **This is not the full member list, and it cannot be.** The complete roster
+ * lives in the community's Guestbook, which is sealed under a key derived from
+ * the community secret — reading it needs the Concord v2 stream layer, which
+ * this package does not implement. What is knowable without it:
+ *
+ * - the **owner**, whose pubkey is in the invite bundle and which the community
+ *   id is a hash commitment to, so it is self-certifying;
+ * - the **inviter**, taken from the verified seal on the invite;
+ * - anyone **observed** — accounts the bot has actually exchanged messages
+ *   with in this community's context.
+ *
+ * {@link complete} is `false` to say so plainly, rather than letting a short
+ * list read as a small community.
+ */
+export class CommunityMemberManager<TUser = unknown> {
+  private readonly observed = new Set<string>();
+
+  constructor(
+    private readonly community: Community,
+    private readonly resolveUser?: (pubkey: string) => Promise<TUser>,
+  ) {}
+
+  /**
+   * Whether this list is the community's real membership.
+   *
+   * Always false today. Check it before showing a count.
+   */
+  public get complete(): boolean {
+    return false;
+  }
+
+  /** The owner's pubkey, hex, when the bundle named one. */
+  public get ownerId(): string | undefined {
+    return this.community.toJSON().owner;
+  }
+
+  /** Record someone seen acting in this community. */
+  public observe(pubkey: string): void {
+    const owner = this.ownerId;
+    if (pubkey && pubkey !== owner && pubkey !== this.community.invitedBy) {
+      this.observed.add(pubkey);
+    }
+  }
+
+  /** Every member the bot knows about, without fetching profiles. */
+  public list(): CommunityMember<TUser>[] {
+    const owner = this.ownerId;
+    const out: CommunityMember<TUser>[] = [];
+    const seen = new Set<string>();
+
+    const push = (pubkey: string | undefined, source: MemberSource) => {
+      if (!pubkey || seen.has(pubkey)) {
+        return;
+      }
+      seen.add(pubkey);
+      out.push({ pubkey, source, isOwner: pubkey === owner });
+    };
+
+    push(owner, 'owner');
+    push(this.community.invitedBy, 'inviter');
+    for (const pubkey of this.observed) {
+      push(pubkey, 'observed');
+    }
+    return out;
+  }
+
+  /** Every known member, with their profiles fetched. */
+  public async fetch(): Promise<CommunityMember<TUser>[]> {
+    const members = this.list();
+    if (!this.resolveUser) {
+      return members;
+    }
+    return Promise.all(
+      members.map(async (member) => ({
+        ...member,
+        user: await this.resolveUser!(member.pubkey),
+      })),
+    );
+  }
+
+  /** How many members the bot knows about. Not the community's size. */
+  public get size(): number {
+    return this.list().length;
   }
 }

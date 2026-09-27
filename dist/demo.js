@@ -12,6 +12,7 @@ import { Contacts } from './contacts.js';
 import { buildInviteRumor, readInviteRumor } from './invites.js';
 import { unwrapGiftWrap } from './giftwrap.js';
 import { CommunityManager, CommunityStore, communityFromInvite } from './communities.js';
+import { UserManager } from './users.js';
 export class VectorBotClient extends EventEmitter {
     constructor(options) {
         super();
@@ -264,9 +265,26 @@ export class VectorBotClient extends EventEmitter {
             this.communityManagerCache = new CommunityManager(this.communityStore, (id) => {
                 this.log('Left community', id);
                 this.emit('community_left', { communityId: id });
-            });
+            }, 
+            // Lets a community's members carry profiles without communities.ts
+            // needing to know anything about relays.
+            (pubkey) => this.users.fetch(pubkey));
         }
         return this.communityManagerCache;
+    }
+    /**
+     * Profile lookups — discord.js-style `client.users`: `.fetch(npub)`,
+     * `.get(npub)`, `.cache`, `.fetchMany([...])`.
+     */
+    get users() {
+        if (!this.userManagerCache) {
+            this.userManagerCache = new UserManager(this.requireBot().client, (pubkey, content) => this.send(pubkey, content));
+        }
+        return this.userManagerCache;
+    }
+    /** A single user's profile. Shorthand for `client.users.fetch(...)`. */
+    async fetchUser(user) {
+        return this.users.fetch(user);
     }
     /**
      * Accept an invite: keep the keys it vended and record the community.

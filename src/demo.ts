@@ -34,6 +34,8 @@ import { unwrapGiftWrap } from './giftwrap.js';
 import type { CommunityInvite, ReceivedInvite } from './invites.js';
 import { CommunityManager, CommunityStore, communityFromInvite } from './communities.js';
 import type { Community, JoinedCommunity } from './communities.js';
+import { UserManager } from './users.js';
+import type { User } from './users.js';
 
 export type BotProfile = {
   name: string;
@@ -191,6 +193,7 @@ export class VectorBotClient extends EventEmitter {
   private readonly receivedInvites = new Map<string, ReceivedInvite>();
   private communityStoreCache?: CommunityStore;
   private communityManagerCache?: CommunityManager;
+  private userManagerCache?: UserManager;
   private connectionMonitor?: NodeJS.Timeout;
   private connectionMonitorStartedAt = 0;
 
@@ -506,12 +509,37 @@ export class VectorBotClient extends EventEmitter {
    */
   public get communities(): CommunityManager {
     if (!this.communityManagerCache) {
-      this.communityManagerCache = new CommunityManager(this.communityStore, (id) => {
-        this.log('Left community', id);
-        this.emit('community_left', { communityId: id });
-      });
+      this.communityManagerCache = new CommunityManager(
+        this.communityStore,
+        (id) => {
+          this.log('Left community', id);
+          this.emit('community_left', { communityId: id });
+        },
+        // Lets a community's members carry profiles without communities.ts
+        // needing to know anything about relays.
+        (pubkey) => this.users.fetch(pubkey),
+      );
     }
     return this.communityManagerCache;
+  }
+
+  /**
+   * Profile lookups — discord.js-style `client.users`: `.fetch(npub)`,
+   * `.get(npub)`, `.cache`, `.fetchMany([...])`.
+   */
+  public get users(): UserManager {
+    if (!this.userManagerCache) {
+      this.userManagerCache = new UserManager(
+        this.requireBot().client,
+        (pubkey, content) => this.send(pubkey, content),
+      );
+    }
+    return this.userManagerCache;
+  }
+
+  /** A single user's profile. Shorthand for `client.users.fetch(...)`. */
+  public async fetchUser(user: string): Promise<User> {
+    return this.users.fetch(user);
   }
 
   /**

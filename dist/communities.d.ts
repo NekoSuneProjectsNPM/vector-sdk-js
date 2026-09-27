@@ -106,6 +106,8 @@ export declare class Collection<K, V> extends Map<K, V> {
 export interface CommunityContext {
     store: CommunityStore;
     onLeave?: (communityId: string) => void;
+    /** Resolves a pubkey to a profile, so members can carry user info. */
+    resolveUser?: (pubkey: string) => Promise<unknown>;
 }
 /**
  * A community the bot is in — the rough equivalent of a discord.js `Guild`.
@@ -116,6 +118,7 @@ export interface CommunityContext {
 export declare class Community {
     private readonly data;
     private readonly context;
+    private memberManager?;
     constructor(data: JoinedCommunity, context: CommunityContext);
     get id(): string;
     get name(): string;
@@ -135,6 +138,12 @@ export declare class Community {
      * invisible to the room.
      */
     get announced(): boolean;
+    /**
+     * The members this bot can see — discord.js's `guild.members`, with the
+     * caveat that it is partial. Read {@link CommunityMemberManager} before
+     * showing a count.
+     */
+    get members(): CommunityMemberManager;
     /** The stored record, keys included. */
     toJSON(): JoinedCommunity;
     /** Leave, discarding the stored keys. */
@@ -152,8 +161,9 @@ export declare class Community {
 export declare class CommunityManager {
     private readonly store;
     private readonly onLeave?;
+    private readonly resolveUser?;
     readonly cache: Collection<string, Community>;
-    constructor(store: CommunityStore, onLeave?: ((communityId: string) => void) | undefined);
+    constructor(store: CommunityStore, onLeave?: ((communityId: string) => void) | undefined, resolveUser?: ((pubkey: string) => Promise<unknown>) | undefined);
     get size(): number;
     /** Read the store and refresh the cache. */
     fetch(): Promise<Collection<string, Community>>;
@@ -163,4 +173,63 @@ export declare class CommunityManager {
     resolve(communityId: string): Promise<Community | undefined>;
     /** Leave by id. */
     leave(communityId: string): Promise<boolean>;
+}
+/** How the bot came to know about a member. */
+export type MemberSource = 'owner' | 'inviter' | 'observed';
+/**
+ * Someone the bot knows to be in a community — the rough equivalent of a
+ * discord.js `GuildMember`.
+ *
+ * `user` is the account's profile; `source` says why the bot believes they are
+ * a member, which matters because the evidence differs in strength: the owner
+ * is proven by the community id itself, an inviter by a verified seal, an
+ * observed member only by having been seen.
+ */
+export interface CommunityMember<TUser = unknown> {
+    /** Public key, hex. */
+    pubkey: string;
+    /** The account's profile, when one has been fetched. */
+    user?: TUser;
+    source: MemberSource;
+    /** True for the account the community id self-certifies as owner. */
+    isOwner: boolean;
+}
+/**
+ * The members of a community that this bot can actually see.
+ *
+ * **This is not the full member list, and it cannot be.** The complete roster
+ * lives in the community's Guestbook, which is sealed under a key derived from
+ * the community secret — reading it needs the Concord v2 stream layer, which
+ * this package does not implement. What is knowable without it:
+ *
+ * - the **owner**, whose pubkey is in the invite bundle and which the community
+ *   id is a hash commitment to, so it is self-certifying;
+ * - the **inviter**, taken from the verified seal on the invite;
+ * - anyone **observed** — accounts the bot has actually exchanged messages
+ *   with in this community's context.
+ *
+ * {@link complete} is `false` to say so plainly, rather than letting a short
+ * list read as a small community.
+ */
+export declare class CommunityMemberManager<TUser = unknown> {
+    private readonly community;
+    private readonly resolveUser?;
+    private readonly observed;
+    constructor(community: Community, resolveUser?: ((pubkey: string) => Promise<TUser>) | undefined);
+    /**
+     * Whether this list is the community's real membership.
+     *
+     * Always false today. Check it before showing a count.
+     */
+    get complete(): boolean;
+    /** The owner's pubkey, hex, when the bundle named one. */
+    get ownerId(): string | undefined;
+    /** Record someone seen acting in this community. */
+    observe(pubkey: string): void;
+    /** Every member the bot knows about, without fetching profiles. */
+    list(): CommunityMember<TUser>[];
+    /** Every known member, with their profiles fetched. */
+    fetch(): Promise<CommunityMember<TUser>[]>;
+    /** How many members the bot knows about. Not the community's size. */
+    get size(): number;
 }

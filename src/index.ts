@@ -15,5 +15,6 @@ export * from './metadata.js';
 export * from './mls-sidecar-adapter.js';
 export * from './subscription.js';
 export * from './upload.js';
+export * from './users.js';
 
 export * as kinds from './kinds.js';

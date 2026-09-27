@@ -27,10 +27,12 @@ import {
   CONTACT_LIST,
 } from '../dist/kinds.js';
 import {
+  CommunityManager,
   CommunityStore,
   communityFromInvite,
   InviteRejected,
 } from '../dist/communities.js';
+import { parseProfile, User } from '../dist/users.js';
 import { getPublicKey } from 'nostr-tools/pure';
 import { nip19 } from 'nostr-tools';
 
@@ -539,6 +541,88 @@ test('a corrupt store reads as empty rather than throwing', async () => {
   await fs.writeFile(file, 'not json at all');
   const store = new CommunityStore(file);
   assert.deepEqual(await store.all(), [], 'a bot must still start');
+});
+
+// ── users and members ────────────────────────────────────────────────────────
+
+test('a profile parses, including both display-name spellings', () => {
+  const a = parseProfile({
+    kind: 0,
+    content: JSON.stringify({ name: 'neko', display_name: 'NekoSune', about: 'hi', bot: true }),
+  });
+  assert.equal(a.name, 'neko');
+  assert.equal(a.displayName, 'NekoSune');
+  assert.equal(a.bot, true);
+
+  // Clients have written both spellings for years.
+  const b = parseProfile({ kind: 0, content: JSON.stringify({ displayName: 'Camel' }) });
+  assert.equal(b.displayName, 'Camel');
+});
+
+test('a malformed or non-profile event yields empty fields, never a throw', () => {
+  assert.deepEqual(parseProfile({ kind: 0, content: 'not json' }), {});
+  assert.deepEqual(parseProfile({ kind: 1, content: '{"name":"x"}' }), {});
+  assert.deepEqual(parseProfile(null), {});
+});
+
+test('a user always has something to display', () => {
+  const account = generateAccount();
+  const anonymous = new User(account.publicKey, {}, { client: {} });
+  assert.ok(anonymous.displayName.length > 0, 'falls back to a short npub');
+  assert.equal(anonymous.known, false, 'no profile was ever found');
+  assert.equal(anonymous.npub, account.npub);
+
+  const named = new User(account.publicKey, { displayName: 'Bot' }, { client: {} }, Date.now());
+  assert.equal(named.displayName, 'Bot');
+  assert.equal(named.known, true);
+});
+
+test('members list the owner and inviter, deduped, and say they are incomplete', async () => {
+  const owner = generateAccount();
+  const inviter = generateAccount();
+  const observer = generateAccount();
+
+  const store = new CommunityStore(path.join(tmp, 'members.json'));
+  const invite = parseCommunityInvite({
+    kind: COMMUNITY_DIRECT_INVITE,
+    content: v2Bundle({ owner: owner.publicKey }),
+  });
+  await store.put(communityFromInvite(invite, { invitedBy: inviter.publicKey }));
+
+  const manager = new CommunityManager(store);
+  const community = (await manager.fetch()).first();
+
+  // The real roster is in the sealed Guestbook, which needs the v2 stream layer.
+  assert.equal(community.members.complete, false, 'must not read as the whole community');
+  assert.equal(community.members.ownerId, owner.publicKey);
+
+  let members = community.members.list();
+  assert.equal(members.length, 2, 'owner + inviter');
+  assert.equal(members.find((m) => m.isOwner).pubkey, owner.publicKey);
+  assert.equal(members.find((m) => m.source === 'inviter').pubkey, inviter.publicKey);
+
+  community.members.observe(observer.publicKey);
+  assert.equal(community.members.size, 3);
+
+  // Observing the owner or inviter again must not duplicate them.
+  community.members.observe(owner.publicKey);
+  community.members.observe(inviter.publicKey);
+  assert.equal(community.members.size, 3, 'no duplicates');
+});
+
+test('when the owner invited you, they are one member not two', async () => {
+  const owner = generateAccount();
+  const store = new CommunityStore(path.join(tmp, 'selfinvite.json'));
+  const invite = parseCommunityInvite({
+    kind: COMMUNITY_DIRECT_INVITE,
+    content: v2Bundle({ owner: owner.publicKey }),
+  });
+  await store.put(communityFromInvite(invite, { invitedBy: owner.publicKey }));
+
+  const community = (await new CommunityManager(store).fetch()).first();
+  const members = community.members.list();
+  assert.equal(members.length, 1, 'the same person twice is one member');
+  assert.equal(members[0].isOwner, true);
 });
 
 // ── runner ───────────────────────────────────────────────────────────────────

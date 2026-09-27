@@ -100,6 +100,22 @@ release.
   older wrap can be the one with life left in it. `clearInvites()` drops held
   invites, `pruneInvites()` drops only expired ones, and accepting removes the
   invite it consumed. Five real invites on the wire now present as one.
+- **Users and profiles**, discord.js-style. `client.users.fetch(npub)` returns a
+  `User` with `displayName`, `username`, `about`, `avatarURL`, `bannerURL`,
+  `nip05`, `lud16` and `bot`, plus `send()`, `dmRelays()` and `verifyNip05()`,
+  which checks the claim against the domain it names rather than trusting it.
+  `fetchMany()` resolves a set in one relay query. `displayName` always returns
+  something, falling back to a short npub, so a caller never needs its own
+  fallback. Misses are cached too — an account with no profile is ordinary, and
+  re-querying on every mention costs more than the empty result is worth.
+- **Community members**, as far as they are knowable. `community.members` lists
+  the **owner** (self-certified: the community id is a hash commitment to it),
+  the **inviter** (from the verified seal), and anyone `observe()`d. Each entry
+  carries its `source`, because the evidence differs in strength.
+  `members.complete` is `false` and will stay so until the v2 stream layer
+  lands: the real roster is the community's Guestbook, sealed under a key
+  derived from the community secret. It is reported rather than hidden so a
+  short list is not mistaken for a small community.
 - Concord v2 kind constants: `COMMUNITY_DIRECT_INVITE` (3313),
   `COMMUNITY_SNAPSHOT` (3312), `COMMUNITY_COMMENT`, the ephemeral typing kind and
   the public invite bundle kind.

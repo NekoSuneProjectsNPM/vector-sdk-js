@@ -224,6 +224,17 @@ export class Community {
     get announced() {
         return this.data.announced;
     }
+    /**
+     * The members this bot can see — discord.js's `guild.members`, with the
+     * caveat that it is partial. Read {@link CommunityMemberManager} before
+     * showing a count.
+     */
+    get members() {
+        if (!this.memberManager) {
+            this.memberManager = new CommunityMemberManager(this, this.context.resolveUser);
+        }
+        return this.memberManager;
+    }
     /** The stored record, keys included. */
     toJSON() {
         return { ...this.data };
@@ -249,9 +260,10 @@ export class Community {
  * what the client has actually seen.
  */
 export class CommunityManager {
-    constructor(store, onLeave) {
+    constructor(store, onLeave, resolveUser) {
         this.store = store;
         this.onLeave = onLeave;
+        this.resolveUser = resolveUser;
         this.cache = new Collection();
     }
     get size() {
@@ -262,7 +274,11 @@ export class CommunityManager {
         const all = await this.store.all();
         this.cache.clear();
         for (const data of all) {
-            this.cache.set(data.communityId, new Community(data, { store: this.store, onLeave: this.onLeave }));
+            this.cache.set(data.communityId, new Community(data, {
+                store: this.store,
+                onLeave: this.onLeave,
+                resolveUser: this.resolveUser,
+            }));
         }
         return this.cache;
     }
@@ -280,7 +296,11 @@ export class CommunityManager {
         if (!data) {
             return undefined;
         }
-        const community = new Community(data, { store: this.store, onLeave: this.onLeave });
+        const community = new Community(data, {
+            store: this.store,
+            onLeave: this.onLeave,
+            resolveUser: this.resolveUser,
+        });
         this.cache.set(communityId, community);
         return community;
     }
@@ -295,5 +315,82 @@ export class CommunityManager {
             this.cache.delete(communityId);
         }
         return left;
+    }
+}
+/**
+ * The members of a community that this bot can actually see.
+ *
+ * **This is not the full member list, and it cannot be.** The complete roster
+ * lives in the community's Guestbook, which is sealed under a key derived from
+ * the community secret — reading it needs the Concord v2 stream layer, which
+ * this package does not implement. What is knowable without it:
+ *
+ * - the **owner**, whose pubkey is in the invite bundle and which the community
+ *   id is a hash commitment to, so it is self-certifying;
+ * - the **inviter**, taken from the verified seal on the invite;
+ * - anyone **observed** — accounts the bot has actually exchanged messages
+ *   with in this community's context.
+ *
+ * {@link complete} is `false` to say so plainly, rather than letting a short
+ * list read as a small community.
+ */
+export class CommunityMemberManager {
+    constructor(community, resolveUser) {
+        this.community = community;
+        this.resolveUser = resolveUser;
+        this.observed = new Set();
+    }
+    /**
+     * Whether this list is the community's real membership.
+     *
+     * Always false today. Check it before showing a count.
+     */
+    get complete() {
+        return false;
+    }
+    /** The owner's pubkey, hex, when the bundle named one. */
+    get ownerId() {
+        return this.community.toJSON().owner;
+    }
+    /** Record someone seen acting in this community. */
+    observe(pubkey) {
+        const owner = this.ownerId;
+        if (pubkey && pubkey !== owner && pubkey !== this.community.invitedBy) {
+            this.observed.add(pubkey);
+        }
+    }
+    /** Every member the bot knows about, without fetching profiles. */
+    list() {
+        const owner = this.ownerId;
+        const out = [];
+        const seen = new Set();
+        const push = (pubkey, source) => {
+            if (!pubkey || seen.has(pubkey)) {
+                return;
+            }
+            seen.add(pubkey);
+            out.push({ pubkey, source, isOwner: pubkey === owner });
+        };
+        push(owner, 'owner');
+        push(this.community.invitedBy, 'inviter');
+        for (const pubkey of this.observed) {
+            push(pubkey, 'observed');
+        }
+        return out;
+    }
+    /** Every known member, with their profiles fetched. */
+    async fetch() {
+        const members = this.list();
+        if (!this.resolveUser) {
+            return members;
+        }
+        return Promise.all(members.map(async (member) => ({
+            ...member,
+            user: await this.resolveUser(member.pubkey),
+        })));
+    }
+    /** How many members the bot knows about. Not the community's size. */
+    get size() {
+        return this.list().length;
     }
 }

@@ -246,6 +246,30 @@ await one.leave();              // or: client.communities.leave(id)
 
 From the terminal: `vector-bot community list` and `vector-bot community leave <id>`.
 
+### Members and user info
+
+```ts
+const user = await client.users.fetch('npub1…');
+user.displayName;            // always something, falls back to a short npub
+user.username;               // the handle, if they set one
+user.about; user.avatarURL; user.nip05; user.bot;
+await user.verifyNip05();    // checks the claim against the domain
+await user.send('hello');
+
+const community = client.communities.get(id);
+for (const member of await community.members.fetch()) {
+  console.log(member.user.displayName, member.isOwner ? '(owner)' : member.source);
+}
+```
+
+> **`community.members` is partial, and says so.** `members.complete` is
+> `false`. The real roster lives in the community's Guestbook, sealed under a
+> key derived from the community secret, so reading it needs the Concord v2
+> stream layer. What is knowable today: the **owner** — self-certified, since
+> the community id is a hash commitment to it — the **inviter**, from the
+> verified seal, and anyone you `observe()`. Check `complete` before showing a
+> member count.
+
 Repeat invites to the same community collapse to a single entry — the
 longest-lived one wins, since an older wrap can be the one with life left in it.
 `clearInvites()` drops held invites and `pruneInvites()` drops only expired ones.

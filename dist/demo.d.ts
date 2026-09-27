@@ -7,6 +7,8 @@ import type { Contact } from './contacts.js';
 import type { CommunityInvite, ReceivedInvite } from './invites.js';
 import { CommunityManager, CommunityStore } from './communities.js';
 import type { Community, JoinedCommunity } from './communities.js';
+import { UserManager } from './users.js';
+import type { User } from './users.js';
 export type BotProfile = {
     name: string;
     displayName: string;
@@ -161,6 +163,7 @@ export declare class VectorBotClient extends EventEmitter {
     private readonly receivedInvites;
     private communityStoreCache?;
     private communityManagerCache?;
+    private userManagerCache?;
     private connectionMonitor?;
     private connectionMonitorStartedAt;
     constructor(options: BotClientOptions);
@@ -248,6 +251,13 @@ export declare class VectorBotClient extends EventEmitter {
      * the cache is what the client has actually seen.
      */
     get communities(): CommunityManager;
+    /**
+     * Profile lookups — discord.js-style `client.users`: `.fetch(npub)`,
+     * `.get(npub)`, `.cache`, `.fetchMany([...])`.
+     */
+    get users(): UserManager;
+    /** A single user's profile. Shorthand for `client.users.fetch(...)`. */
+    fetchUser(user: string): Promise<User>;
     /**
      * Accept an invite: keep the keys it vended and record the community.
      *
