@@ -11,6 +11,61 @@ changed in each version.
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-09-27
+
+Concord v2: a bot can now join a community and read and post in it. Until this,
+accepting an invite kept the keys but left the bot invisible — the community had
+no record of it, and it could not read the room.
+
+Two things remain out: the **control-plane fold**, so channels created after the
+invite, renames, the community banlist and the owner-anchor check on join are
+not yet seen; and **following rekeys**, so after a key rotation the bot needs a
+fresh invite.
+
+### Added
+
+- **Key derivation** (`concord/derive`), ported from
+  `vector_core::community::v2::derive`: HKDF-SHA256 over the frozen
+  `CORD-02 Appendix A` labels, giving the channel, control, control-signer,
+  guestbook, rekey and dissolved keys plus the community-id and epoch-key
+  commitments. Checked against the **golden vectors minted by an independent
+  implementation** upstream, so the derivation is byte-identical to the spec —
+  which everything above it depends on.
+- **The stream envelope** (`concord/stream`): Concord's reversed seal-and-wrap,
+  where the wrap key comes from the group key rather than an ephemeral keypair.
+- **Community chat.** The client follows every accepted community:
+  `community_message` delivers each message with `reply()` and `react()`, and
+  `sendCommunityMessage`, `editCommunityMessage`, `deleteCommunityMessage`,
+  `reactInCommunity` and `communityTyping` post in a channel by id or name.
+  Edits, deletes, reactions and typing from others arrive as their own events.
+  Every event is verified before it surfaces: wrap address, seal signature,
+  seal and rumor naming the same author, a recomputed rumor id, and the exact
+  channel and epoch binding, so a message cannot be spliced across channels or
+  epochs. The bot's own messages are never echoed back.
+- **Guestbook join and leave.** A first join is announced once, echoing the
+  invite's attribution; an earlier join by the same account is found on the
+  relays and adopted instead of re-announced. Leaving publishes the leave
+  before the keys are discarded. Live joins, leaves and kicks arrive as
+  `community_member_*` events.
+- **`concord` exports**: the v2 key derivations, the stream envelope, and the
+  chat and guestbook builders and parsers, for anything the client does not
+  wrap.
+
+### Changed
+
+- Accepting an invite no longer stops at storing keys: the join is announced, so
+  the community sees the bot and `announced` becomes meaningful.
+
+### Security
+
+- **An invite whose community id does not commit to its claimed owner is
+  refused** on accept (`InviteRejected`, reason `bad-community-id`), and a
+  stored community failing the same check is not followed. The id is
+  `sha256("concord/community" || owner || salt)`; a mismatch means a forged or
+  corrupt bundle. This is the eclipse check `vector-core` calls for — the owner
+  commitment proves who the owner is, so a bundle that fails it could otherwise
+  partition a bot onto a plane an attacker controls.
+
 ## [1.3.0] - 2026-09-27
 
 Closes a sender-spoofing hole present in every earlier release, makes invites
@@ -336,7 +391,8 @@ Never tagged or published; superseded by 1.1.0.
   metadata builders, AES-256-GCM file encryption, NIP-96 upload, and the
   `VectorBotClient` / `VectorBot` / `Channel` surface, with a demo script.
 
-[unreleased]: https://github.com/NekoSuneProjectsNPM/vector-sdk-js/compare/v1.3.0...HEAD
+[unreleased]: https://github.com/NekoSuneProjectsNPM/vector-sdk-js/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/NekoSuneProjectsNPM/vector-sdk-js/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/NekoSuneProjectsNPM/vector-sdk-js/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.1.0...v1.1.1

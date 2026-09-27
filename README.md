@@ -263,22 +263,56 @@ for (const member of await community.members.fetch()) {
 ```
 
 > **`community.members` is partial, and says so.** `members.complete` is
-> `false`. The real roster lives in the community's Guestbook, sealed under a
-> key derived from the community secret, so reading it needs the Concord v2
-> stream layer. What is knowable today: the **owner** — self-certified, since
-> the community id is a hash commitment to it — the **inviter**, from the
-> verified seal, and anyone you `observe()`. Check `complete` before showing a
-> member count.
+> `false`: folding the full Guestbook (snapshots after a refounding, kicks
+> judged against the roster) is not implemented yet. What it holds: the
+> **owner** — self-certified, since the community id is a hash commitment to
+> it — the **inviter**, from the verified seal, and anyone you `observe()`.
+> Live joins and leaves arrive as `community_member_join` /
+> `community_member_leave`. Check `complete` before showing a member count.
 
 Repeat invites to the same community collapse to a single entry — the
 longest-lived one wins, since an older wrap can be the one with life left in it.
 `clearInvites()` drops held invites and `pruneInvites()` drops only expired ones.
 
-> **Accepting records membership; it does not yet make the bot a participant.**
-> Announcing the join and reading or posting in a channel ride the Concord v2
-> stream layer, which this package does not implement. A bot holds valid
-> credentials and is ready, but the community cannot see it and it cannot read
-> the room. `community.announced` stays `false` to mark exactly that.
+### Reading and posting in a community
+
+Once connected, the client follows every accepted community: it reads each
+channel the invite granted and announces its join on the community's
+Guestbook, once. An earlier join by the same account is found and adopted
+instead of re-announced, since every re-publish shows as "<bot> has joined" to
+the whole room. `community.announced` records it.
+
+```ts
+client.on('community_message', async (message) => {
+  console.log(`[${message.communityName} #${message.channelName}] ${message.author}: ${message.content}`);
+  if (message.content === '!ping') {
+    await message.reply('pong');   // quotes the message, same channel
+    await message.react('🏓');
+  }
+});
+
+// Channels by id or name.
+const { id } = await client.sendCommunityMessage(communityId, 'general', 'hello');
+await client.editCommunityMessage(communityId, 'general', id, 'hello (edited)');
+await client.reactInCommunity(communityId, 'general', { id, author: botPubkey }, '👍');
+await client.communityTyping(communityId, 'general');
+await client.deleteCommunityMessage(communityId, 'general', id);
+
+client.getCommunityChannels(communityId); // what the bot can read and post in
+```
+
+Leaving (`community.leave()`) publishes the Guestbook leave before the keys are
+discarded. Every received event is fully verified before it is surfaced: the
+wrap must come from the channel's address, the seal's signature must check out
+and name the same author as the rumor, the rumor id is recomputed, and the
+rumor must commit to the exact channel and epoch it was read under. The bot's
+own messages are never echoed back.
+
+> **Not implemented yet:** the control-plane fold (channels created after the
+> invite, renames, the community banlist, and the owner-anchor check on join)
+> and following rekeys. The bot reads the channels its invite granted; after a
+> key rotation (a ban, or a switch to private) it needs a fresh invite.
+> `options.communities: false` holds the keys without participating.
 
 A bot can read and forward invites, but **cannot create them**. A bundle carries
 live key material for the community, which only a member holding that
@@ -315,6 +349,11 @@ and sent as a gift-wrapped kind 15 rumor. Received attachments also arrive on th
 | `manifest_published` | The command manifest went out. |
 | `disconnect` / `reconnect` / `error` | Relay lifecycle. |
 | `group_discovered` / `group_wrapper` / `mls_welcome` | Legacy MLS group path. |
+| `community_message` | A message in a community channel: a `CommunityMessage` with `reply()` and `react()`. |
+| `community_message_update` / `community_message_delete` | An edit or delete in a community channel. |
+| `community_reaction` / `community_typing` | A reaction or typing indicator in a community channel. |
+| `community_member_join` / `community_member_leave` / `community_member_kick` | Guestbook motion. |
+| `community_joined` / `community_announced` / `community_left` | The bot accepted an invite, its join is on the Guestbook, or it left. |
 
 ## Options
 
@@ -326,6 +365,8 @@ and sent as a gift-wrapped kind 15 rumor. Received attachments also arrive on th
 | `publishManifest` | `true` | Publish the command manifest on connect. |
 | `discoveryRelays` | `purplepag.es`, `relay.nostr.band`, `nos.lol` | Extra relays for manifest and inbox-list discovery. |
 | `reconnect` / `reconnectIntervalMs` | `true` / `15000` | Relay reconnection. |
+| `communities` | `true` | Read and post in accepted communities, and announce the join. |
+| `communitiesFile` | `vector-bot-communities.json` | Where accepted communities and their keys are kept. |
 
 ## Vector private groups
 
@@ -351,10 +392,10 @@ const client = new VectorBotClient({
 });
 ```
 
-VectorApp has since moved communities to the **Concord v2** protocol (kinds
-3300-3311), whose encrypted envelopes, epoch keys and consensus folding live in
-`vector-core` and are not implemented in this package. The v2 kind constants are
-exported from `kinds` so you can recognise that traffic:
+VectorApp has since moved communities to the **Concord v2** protocol, which
+this package implements for chat (see *Reading and posting in a community*); the
+building blocks are exported as `concord` (key derivation, the stream envelope,
+chat and guestbook). The v2 kind constants are exported from `kinds` too:
 
 ```ts
 import { kinds } from '@nekosuneprojects/vector-sdk';
