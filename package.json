@@ -6,12 +6,14 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
-    "dist"
+    "dist",
+    "bin",
+    "RELEASING.txt"
   ],
   "scripts": {
     "build": "tsc",
     "prepack": "npm run build",
-    "test": "npm run build && node tests/bot-interface.parity.mjs"
+    "test": "npm run build && node tests/bot-interface.parity.mjs && node tests/identity.test.mjs"
   },
   "repository": {
     "type": "git",
@@ -46,5 +48,8 @@
     "@types/node": "^20.7.0",
     "@types/ws": "^8.18.1",
     "typescript": "^5.5.2"
+  },
+  "bin": {
+    "vector-bot": "bin/vector-bot.js"
   }
 }

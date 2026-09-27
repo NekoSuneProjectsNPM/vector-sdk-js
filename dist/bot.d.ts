@@ -112,6 +112,19 @@ export declare class Channel {
      * edit, reaction or deletion references.
      */
     send(content: string, options?: SendOptions): Promise<SendResult>;
+    /**
+     * Gift-wrap and send a rumor you built yourself.
+     *
+     * The escape hatch for event kinds this class has no method for — a community
+     * invite bundle, say. The rumor goes out over the same NIP-17 path as a
+     * message, so `p`-tagging, inbox-relay routing and the self-wrap all apply.
+     */
+    sendRumor(rumor: {
+        kind: number;
+        created_at?: number;
+        tags?: string[][];
+        content: string;
+    }): Promise<SendResult>;
     /** Send a threaded reply to `messageId`. */
     reply(messageId: string, content: string, options?: SendOptions): Promise<SendResult>;
     /**

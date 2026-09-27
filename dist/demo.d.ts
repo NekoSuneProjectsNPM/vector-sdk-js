@@ -2,6 +2,9 @@ import { EventEmitter } from 'events';
 import type { Event } from 'nostr-tools';
 import type { AttachmentFile, ReceivedAttachment, SendOptions, SendResult } from './bot.js';
 import { CommandBuilder } from './commands.js';
+import { Contacts } from './contacts.js';
+import type { Contact } from './contacts.js';
+import type { CommunityInvite, ReceivedInvite } from './invites.js';
 export type BotProfile = {
     name: string;
     displayName: string;
@@ -143,6 +146,9 @@ export declare class VectorBotClient extends EventEmitter {
     private readonly observedGroupIds;
     private readonly seenMessageIds;
     private readonly commandRegistry;
+    private contactsCache?;
+    /** Invites the bot has received, newest last, keyed by community id. */
+    private readonly receivedInvites;
     private connectionMonitor?;
     private connectionMonitorStartedAt;
     constructor(options: BotClientOptions);
@@ -201,6 +207,35 @@ export declare class VectorBotClient extends EventEmitter {
     downloadAttachment(attachment: ReceivedAttachment): Promise<Buffer>;
     /** Download a received attachment and write it to `destination`. */
     saveAttachment(attachment: ReceivedAttachment, destination: string): Promise<string>;
+    /** The bot's friend list. See {@link Contacts}. */
+    get contacts(): Contacts;
+    /** Follow someone, keeping everyone already on the list. */
+    addFriend(user: string, options?: {
+        relay?: string;
+        petname?: string;
+    }): Promise<Contact[]>;
+    /** Unfollow someone, keeping everyone else. */
+    removeFriend(user: string): Promise<Contact[]>;
+    /** Everyone the bot currently follows. */
+    getFriends(): Promise<Contact[]>;
+    /**
+     * Community invites the bot has received and that have not expired.
+     *
+     * A bot cannot mint an invite — the bundle carries key material only a member
+     * holding the community's state can produce — but it can pass on one it was
+     * given. See {@link forwardInvite}.
+     */
+    getInvites(): ReceivedInvite[];
+    /** A received invite by community id, expired ones included. */
+    getInvite(communityId: string): ReceivedInvite | undefined;
+    /**
+     * Send a community invite on to someone else.
+     *
+     * `invite` is either a community id the bot holds an invite for, or a bundle
+     * you already have. The original NIP-40 expiry is preserved, so forwarding
+     * cannot outlive what the issuer granted.
+     */
+    forwardInvite(recipient: string, invite: string | CommunityInvite): Promise<SendResult>;
     private requireBot;
     sendGroupMessage(groupId: string, message: string): Promise<boolean>;
     close(): void;

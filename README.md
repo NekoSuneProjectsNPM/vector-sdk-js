@@ -24,6 +24,55 @@ engine underneath it, while staying idiomatic for Node.
 npm install @nekosuneprojects/vector-sdk
 ```
 
+## Create a bot account
+
+A Vector bot *is* a Nostr keypair. There is no signup and no server to ask — you
+mint one locally and it exists immediately.
+
+```bash
+npx vector-bot create --mnemonic --publish
+```
+
+That writes `vector-bot-account.json` next to your project, **adds it to
+`.gitignore`** (and `.npmignore`, if you have one) so it can never be committed
+or published, prints the bot's `npub` to share, and publishes its profile and
+inbox relays so people can reach it.
+
+`--mnemonic` also gives you a twelve-word seed phrase that regenerates the key
+if the file is ever lost. Write it down.
+
+| Command | What it does |
+| --- | --- |
+| `vector-bot create` | Make an account. `--mnemonic`, `--publish`, `--force`, `--from-mnemonic "…"` |
+| `vector-bot show` | Print the npub and pubkey. `--show-secret` for the private key |
+| `vector-bot publish-profile` | Publish the kind-0 profile and kind-10050 inbox relays |
+| `vector-bot send <npub> <msg>` | Send a direct message |
+| `vector-bot friend add/remove/list` | Manage the bot's NIP-02 contact list |
+
+> **The account file is the bot.** Anyone holding that private key can read the
+> bot's messages and send as it. There is no recovery and no revocation.
+
+### Where the key is read from
+
+Commands look for the key in this order, so the same code works locally and
+deployed without a branch:
+
+1. `--nsec` on the command line
+2. the account file — `--file`, `$VECTOR_ACCOUNT_FILE`, or `./vector-bot-account.json`
+3. the environment, for containers and CI with no writable disk:
+   `VECTOR_NSEC`, `VECTOR_PRIVATE_KEY`, `NOSTR_PRIVATE_KEY`, `NSEC`, or a NIP-06
+   seed phrase in `VECTOR_MNEMONIC` / `NOSTR_MNEMONIC`
+
+In code, `resolveAccount` does the same thing:
+
+```ts
+import { resolveAccount } from '@nekosuneprojects/vector-sdk';
+
+// File if present, else the environment, else mint one and save it.
+const { account, source } = await resolveAccount({ create: true });
+console.log(`Running as ${account.npub} (from ${source})`);
+```
+
 ## Getting started
 
 ```ts
@@ -151,6 +200,38 @@ await client.send(pubkey, 'gone in an hour', {
   expiration: Math.floor(Date.now() / 1000) + 3600,
 });
 ```
+
+## Friends and invites
+
+```ts
+await client.addFriend('npub1…', { petname: 'owner' });
+await client.removeFriend('npub1…');
+const friends = await client.getFriends();
+```
+
+Friends are a NIP-02 contact list (kind 3): a public, replaceable address book.
+Vector does not use it to decide who may talk to the bot — any npub can DM any
+other npub — so treat it as discoverability, not access control. Each change
+re-fetches the published list and republishes it whole, so a restart or a second
+client cannot silently drop everyone.
+
+Community invites arrive as gift-wrapped bundles and are surfaced as they land:
+
+```ts
+client.on('invite', ({ invite, senderPubkey, expired }) => {
+  if (expired) return;
+  console.log(`Invited to ${invite.name} (${invite.communityId}) by ${senderPubkey}`);
+});
+
+// Pass an invite the bot holds on to someone else.
+await client.forwardInvite('npub1…', invite.communityId);
+```
+
+A bot can read and forward invites, but **cannot create them**. A bundle carries
+live key material for the community, which only a member holding that
+community's state can produce — and that state lives in `vector-core`. The
+original NIP-40 expiry is preserved on forward, so passing one on never outlives
+what the issuer granted.
 
 ## Files
 

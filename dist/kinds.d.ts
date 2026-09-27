@@ -11,6 +11,8 @@ export declare const CHAT_MESSAGE = 9;
 export declare const REACTION = 7;
 /** NIP-09 deletion request. */
 export declare const DELETION = 5;
+/** NIP-02 contact list — who an account follows. Replaceable. */
+export declare const CONTACT_LIST = 3;
 /** NIP-04 legacy encrypted DM. Vector no longer sends these; opt-in only. */
 export declare const ENCRYPTED_DIRECT_MESSAGE = 4;
 /** NIP-17 private direct message (the gift-wrapped rumor kind). */
