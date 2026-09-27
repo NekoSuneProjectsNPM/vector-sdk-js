@@ -12,6 +12,10 @@ on:
       - opened
       - reopened
       - synchronize
+  # A merge performed with a token whose events do not raise workflow runs
+  # (`gh pr merge` does this) leaves no push event behind, so the release would
+  # never be cut. This is the manual way back in.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -20,7 +24,7 @@ jobs:
   # Build and test the code that would be released. A version is only published
   # if this passes, so a broken build never becomes a release.
   build:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -83,6 +87,6 @@ jobs:
           # been released before. Re-pushing to main without a version bump
           # just refreshes the draft, so it cannot publish the same version
           # twice or trip the publish workflow's duplicate guard.
-          publish: ${{ github.event_name == 'push' && needs.build.outputs.is_new == 'true' }}
+          publish: ${{ github.event_name != 'pull_request_target' && needs.build.outputs.is_new == 'true' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

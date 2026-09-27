@@ -21,11 +21,16 @@ import { argAccessors, CommandBuilder, CommandRegistry } from './commands.js';
 import type { CommandContext } from './commands.js';
 import {
   APPLICATION_SPECIFIC,
+  COMMUNITY_INVITE_BUNDLE,
   DELETION,
   FILE_ATTACHMENT,
   MESSAGE_EDIT,
   REACTION,
 } from './kinds.js';
+import { Contacts } from './contacts.js';
+import type { Contact } from './contacts.js';
+import { buildInviteRumor, readInviteRumor } from './invites.js';
+import type { CommunityInvite, ReceivedInvite } from './invites.js';
 
 export type BotProfile = {
   name: string;
@@ -170,6 +175,9 @@ export class VectorBotClient extends EventEmitter {
   private readonly observedGroupIds = new Set<string>();
   private readonly seenMessageIds = new Set<string>();
   private readonly commandRegistry = new CommandRegistry<MessageTags>();
+  private contactsCache?: Contacts;
+  /** Invites the bot has received, newest last, keyed by community id. */
+  private readonly receivedInvites = new Map<string, ReceivedInvite>();
   private connectionMonitor?: NodeJS.Timeout;
   private connectionMonitorStartedAt = 0;
 
@@ -416,6 +424,105 @@ export class VectorBotClient extends EventEmitter {
     destination: string,
   ): Promise<string> {
     return this.requireBot().saveAttachment(attachment, destination);
+  }
+
+  // ── Friends (NIP-02 contact list) ──────────────────────────────────────────
+
+  /** The bot's friend list. See {@link Contacts}. */
+  public get contacts(): Contacts {
+    if (!this.contactsCache) {
+      this.contactsCache = new Contacts(this.requireBot().client);
+    }
+    return this.contactsCache;
+  }
+
+  /** Follow someone, keeping everyone already on the list. */
+  public async addFriend(
+    user: string,
+    options: { relay?: string; petname?: string } = {},
+  ): Promise<Contact[]> {
+    const next = await this.contacts.add(user, options);
+    this.log('Added friend', user, '- now following', next.length);
+    this.emit('friend_added', { user, contacts: next });
+    return next;
+  }
+
+  /** Unfollow someone, keeping everyone else. */
+  public async removeFriend(user: string): Promise<Contact[]> {
+    const next = await this.contacts.remove(user);
+    this.log('Removed friend', user, '- now following', next.length);
+    this.emit('friend_removed', { user, contacts: next });
+    return next;
+  }
+
+  /** Everyone the bot currently follows. */
+  public async getFriends(): Promise<Contact[]> {
+    return this.contacts.list();
+  }
+
+  // ── Invites ────────────────────────────────────────────────────────────────
+
+  /**
+   * Community invites the bot has received and that have not expired.
+   *
+   * A bot cannot mint an invite — the bundle carries key material only a member
+   * holding the community's state can produce — but it can pass on one it was
+   * given. See {@link forwardInvite}.
+   */
+  public getInvites(): ReceivedInvite[] {
+    const now = Math.floor(Date.now() / 1000);
+    return Array.from(this.receivedInvites.values()).filter(
+      (received) => !received.expiresAt || received.expiresAt > now,
+    );
+  }
+
+  /** A received invite by community id, expired ones included. */
+  public getInvite(communityId: string): ReceivedInvite | undefined {
+    return this.receivedInvites.get(communityId);
+  }
+
+  /**
+   * Send a community invite on to someone else.
+   *
+   * `invite` is either a community id the bot holds an invite for, or a bundle
+   * you already have. The original NIP-40 expiry is preserved, so forwarding
+   * cannot outlive what the issuer granted.
+   */
+  public async forwardInvite(
+    recipient: string,
+    invite: string | CommunityInvite,
+  ): Promise<SendResult> {
+    const bot = this.requireBot();
+
+    let bundle: CommunityInvite;
+    let expiresAt: number | undefined;
+    if (typeof invite === 'string') {
+      const held = this.receivedInvites.get(invite);
+      if (!held) {
+        throw new Error(
+          `No invite held for community ${invite}. The bot can only forward invites it has received.`,
+        );
+      }
+      const now = Math.floor(Date.now() / 1000);
+      if (held.expiresAt && held.expiresAt <= now) {
+        throw new Error(`The invite for community ${invite} has expired.`);
+      }
+      bundle = held.invite;
+      expiresAt = held.expiresAt;
+    } else {
+      bundle = invite;
+    }
+
+    const rumor = buildInviteRumor(bundle, { expiresAt });
+    const channel = bot.getChat(recipient);
+    const result = await channel.sendRumor(rumor);
+    this.log('Forwarded invite for', bundle.communityId, 'to', recipient);
+    this.emit('invite_forwarded', {
+      communityId: bundle.communityId,
+      recipient,
+      messageId: result.id,
+    });
+    return result;
   }
 
   private requireBot(): VectorBot {
@@ -793,6 +900,23 @@ export class VectorBotClient extends EventEmitter {
             rumor,
             attachment,
           });
+        }
+        return;
+      }
+
+      // A community invite. Held rather than acted on: joining a Concord v2
+      // community needs the envelope and epoch-key machinery that lives in
+      // vector-core, so what a bot can do here is surface it and pass it on.
+      if (emitDirectMessages && rumor.kind === COMMUNITY_INVITE_BUNDLE) {
+        const received = readInviteRumor(rumor);
+        if (received) {
+          this.receivedInvites.set(received.invite.communityId, received);
+          this.log(
+            'Invite received for',
+            received.invite.communityId,
+            received.expired ? '(already expired)' : '',
+          );
+          this.emit('invite', received);
         }
         return;
       }

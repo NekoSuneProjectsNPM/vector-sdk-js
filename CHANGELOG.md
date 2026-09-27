@@ -11,6 +11,48 @@ changed in each version.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-27
+
+Bot accounts: creating one, storing it safely, and the things a bot needs an
+identity for.
+
+### Added
+
+- **Bot accounts.** `generateAccount()` mints a Nostr keypair and returns it in
+  every form you need — `npub`/`publicKey` to share, `nsec`/`privateKey` to keep
+  — plus an optional twelve-word NIP-06 seed phrase that regenerates the key.
+  `accountFromKey`, `accountFromMnemonic`, `saveAccount` and `loadAccount` round
+  a bot's identity through disk. Loading re-derives every field from the private
+  key, so a hand-edited file cannot claim an npub it does not own.
+- **The `vector-bot` CLI**, for anyone who would rather not write code to get a
+  bot: `create`, `show`, `publish-profile`, `send` and `friend add/remove/list`.
+  `vector-bot create --mnemonic --publish` is a working, discoverable bot in one
+  command.
+- **The account file is protected on creation.** `ensureAccountIgnored()` adds it
+  to the project's `.gitignore`, creating one if needed, and to `.npmignore` when
+  the project already has one — npm only falls back to `.gitignore` when no
+  `.npmignore` exists, so a project with one would otherwise publish the key.
+  Idempotent, and it never invents an `.npmignore`, which would silently change
+  what the project ships.
+- **`resolveAccount()`** reads the account file when it exists and falls back to
+  the environment (`VECTOR_NSEC`, `VECTOR_PRIVATE_KEY`, `NOSTR_PRIVATE_KEY`,
+  `NSEC`, or a seed phrase in `VECTOR_MNEMONIC` / `NOSTR_MNEMONIC`) when it does
+  not, so the same code runs from a working copy and from a container with no
+  writable disk. With `create: true` it mints and saves one instead of failing,
+  which is the keyless mode: nothing to configure on the first run.
+- **Friends.** `client.addFriend()`, `removeFriend()` and `getFriends()` manage
+  the bot's NIP-02 contact list. Each change re-fetches the published list before
+  republishing it, so a restart or a second client cannot drop everyone else.
+- **Invites.** Community invite bundles (kind 3304) are parsed as they arrive and
+  surfaced on the `invite` event, with expired ones flagged rather than dropped.
+  `client.forwardInvite()` passes one the bot holds on to someone else, preserving
+  the original NIP-40 expiry. A bot cannot *create* an invite: the bundle carries
+  live community key material that only a member holding that community's state
+  can produce. Bundles are treated as untrusted input and bounded on read, matching
+  `vector_core::community::invite`.
+- **`channel.sendRumor()`** gift-wraps and sends a rumor you built yourself, for
+  event kinds with no dedicated method.
+
 ## [1.1.1] - 2026-09-23
 
 Release plumbing only. No changes to the SDK itself.
@@ -185,7 +227,8 @@ Never tagged or published; superseded by 1.1.0.
   metadata builders, AES-256-GCM file encryption, NIP-96 upload, and the
   `VectorBotClient` / `VectorBot` / `Channel` surface, with a demo script.
 
-[unreleased]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.1.1...HEAD
+[unreleased]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.0.4...v1.1.0
 [1.0.5]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.0.4...v1.0.5

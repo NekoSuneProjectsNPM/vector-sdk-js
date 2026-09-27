@@ -218,6 +218,25 @@ export class Channel {
         }
         return result;
     }
+    /**
+     * Gift-wrap and send a rumor you built yourself.
+     *
+     * The escape hatch for event kinds this class has no method for — a community
+     * invite bundle, say. The rumor goes out over the same NIP-17 path as a
+     * message, so `p`-tagging, inbox-relay routing and the self-wrap all apply.
+     */
+    async sendRumor(rumor) {
+        const tags = rumor.tags ?? [];
+        // Every rumor names its recipient, so a caller that built tags without a
+        // `p` tag still produces a deliverable event.
+        const hasRecipient = tags.some((tag) => tag[0] === 'p' && tag[1] === this.recipient);
+        return this.deliver({
+            kind: rumor.kind,
+            created_at: rumor.created_at ?? Math.floor(Date.now() / 1000),
+            tags: hasRecipient ? tags : [['p', this.recipient], ...tags],
+            content: rumor.content,
+        });
+    }
     /** Send a threaded reply to `messageId`. */
     async reply(messageId, content, options = {}) {
         return this.send(content, { ...options, replyTo: messageId });
