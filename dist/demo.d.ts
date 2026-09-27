@@ -9,6 +9,7 @@ import { CommunityManager, CommunityStore } from './communities.js';
 import type { Community, JoinedCommunity } from './communities.js';
 import { UserManager } from './users.js';
 import type { User } from './users.js';
+import type { CommunitySendResult, LiveChannel } from './concord/runtime.js';
 export type BotProfile = {
     name: string;
     displayName: string;
@@ -55,6 +56,11 @@ export type BotClientOptions = {
      * material, so it is written owner-only and belongs out of version control.
      */
     communitiesFile?: string;
+    /**
+     * Read and post in accepted Concord v2 communities (and announce the join).
+     * On by default; set false to hold community keys without participating.
+     */
+    communities?: boolean;
     /**
      * Publish the slash-command manifest on connect. On by default whenever at
      * least one command is registered.
@@ -176,6 +182,7 @@ export declare class VectorBotClient extends EventEmitter {
     private readonly receivedInvites;
     private communityStoreCache?;
     private communityManagerCache?;
+    private communityRuntime?;
     private userManagerCache?;
     private connectionMonitor?;
     private connectionMonitorStartedAt;
@@ -278,13 +285,41 @@ export declare class VectorBotClient extends EventEmitter {
      * already have. Re-accepting replaces the stored entry, which is how a bot
      * picks up rotated keys or newly granted channels.
      *
-     * **This records membership; it does not yet make the bot a participant.**
-     * Announcing the join and reading or posting in a channel ride the Concord v2
-     * stream layer, which this package does not implement. So the bot holds valid
-     * credentials and is ready, but the community cannot see it and it cannot
-     * read the room. `announced` stays false to mark exactly that.
+     * When connected, the bot starts reading the community's channels right
+     * away and announces its join on the guestbook (once: a re-accept, or an
+     * earlier join already on the relays, doesn't announce again).
      */
     acceptInvite(invite: string | CommunityInvite): Promise<JoinedCommunity>;
+    private startCommunities;
+    private requireCommunities;
+    /** Channels the bot can read and post in, optionally for one community. */
+    getCommunityChannels(communityId?: string): LiveChannel[];
+    /**
+     * Post in a community channel, by channel id or name (`general` / `#general`).
+     * Returns the message id that replies, edits and reactions reference.
+     */
+    sendCommunityMessage(communityId: string, channel: string, content: string, options?: {
+        replyTo?: {
+            id: string;
+            author: string;
+        };
+        emoji?: [string, string][];
+        expiration?: number;
+    }): Promise<CommunitySendResult>;
+    /** React to a community message. */
+    reactInCommunity(communityId: string, channel: string, target: {
+        id: string;
+        author: string;
+        kind?: number;
+    }, emoji: string, options?: {
+        emojiUrl?: string;
+    }): Promise<CommunitySendResult>;
+    /** Edit one of the bot's own community messages. */
+    editCommunityMessage(communityId: string, channel: string, messageId: string, content: string): Promise<CommunitySendResult>;
+    /** Delete one of the bot's own community messages. */
+    deleteCommunityMessage(communityId: string, channel: string, messageId: string): Promise<CommunitySendResult>;
+    /** Show a typing indicator in a community channel. */
+    communityTyping(communityId: string, channel: string): Promise<CommunitySendResult>;
     /** Every community the bot has accepted. */
     getCommunities(): Promise<Community[]>;
     /** Forget an accepted community and discard its keys. */

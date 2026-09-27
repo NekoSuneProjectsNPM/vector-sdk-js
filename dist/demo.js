@@ -13,6 +13,7 @@ import { buildInviteRumor, readInviteRumor } from './invites.js';
 import { unwrapGiftWrap } from './giftwrap.js';
 import { CommunityManager, CommunityStore, communityFromInvite } from './communities.js';
 import { UserManager } from './users.js';
+import { CommunityRuntime } from './concord/runtime.js';
 export class VectorBotClient extends EventEmitter {
     constructor(options) {
         super();
@@ -117,6 +118,7 @@ export class VectorBotClient extends EventEmitter {
         await this.bootstrapKnownGroups(bot);
         this.setupSubscriptions(bot);
         this.startConnectionMonitor(bot);
+        await this.startCommunities(bot);
         this.emit('ready', {
             pubkey: bot.publicKey,
             profile: {
@@ -268,7 +270,12 @@ export class VectorBotClient extends EventEmitter {
             }, 
             // Lets a community's members carry profiles without communities.ts
             // needing to know anything about relays.
-            (pubkey) => this.users.fetch(pubkey));
+            (pubkey) => this.users.fetch(pubkey), 
+            // Say goodbye on the guestbook while the keys still exist.
+            async (community) => {
+                this.communityRuntime?.remove(community.communityId);
+                await this.communityRuntime?.announceLeave(community);
+            });
         }
         return this.communityManagerCache;
     }
@@ -293,11 +300,9 @@ export class VectorBotClient extends EventEmitter {
      * already have. Re-accepting replaces the stored entry, which is how a bot
      * picks up rotated keys or newly granted channels.
      *
-     * **This records membership; it does not yet make the bot a participant.**
-     * Announcing the join and reading or posting in a channel ride the Concord v2
-     * stream layer, which this package does not implement. So the bot holds valid
-     * credentials and is ready, but the community cannot see it and it cannot
-     * read the room. `announced` stays false to mark exactly that.
+     * When connected, the bot starts reading the community's channels right
+     * away and announces its join on the guestbook (once: a re-accept, or an
+     * earlier join already on the relays, doesn't announce again).
      */
     async acceptInvite(invite) {
         let bundle;
@@ -317,7 +322,11 @@ export class VectorBotClient extends EventEmitter {
             invitedBy = '';
         }
         const community = communityFromInvite(bundle, { invitedBy, expiresAt });
+        // A re-accept refreshes keys; it is not a second join.
+        const previous = await this.communityStore.get(community.communityId);
+        community.announced = previous?.announced ?? false;
         await this.communityStore.put(community);
+        await this.communityRuntime?.add(community);
         // The invite has done its job; holding it would only re-offer a community
         // already joined.
         this.receivedInvites.delete(community.communityId);
@@ -326,6 +335,60 @@ export class VectorBotClient extends EventEmitter {
         this.log('Accepted invite to', community.name, `[${community.communityId}]`);
         this.emit('community_joined', community);
         return community;
+    }
+    async startCommunities(bot) {
+        if (this.options.communities === false) {
+            return;
+        }
+        this.communityRuntime = new CommunityRuntime({
+            publicKey: bot.publicKey,
+            privateKey: bot.privateKeyBytes,
+            pool: bot.client.pool,
+            publish: (event, relays) => bot.client.publishEvent(event, relays),
+            save: (record) => this.communityStore.put(record),
+            emit: (event, ...args) => {
+                this.emit(event, ...args);
+            },
+            log: (...args) => this.log(...args),
+        });
+        const records = await this.communityStore.all();
+        await this.communityRuntime.start(records);
+        if (records.length) {
+            this.log('Following', records.length, 'community(ies)');
+        }
+    }
+    requireCommunities() {
+        if (!this.communityRuntime) {
+            throw new Error(this.bot ? 'Communities are disabled (options.communities is false)' : 'Bot is not connected');
+        }
+        return this.communityRuntime;
+    }
+    /** Channels the bot can read and post in, optionally for one community. */
+    getCommunityChannels(communityId) {
+        return this.requireCommunities().channels(communityId);
+    }
+    /**
+     * Post in a community channel, by channel id or name (`general` / `#general`).
+     * Returns the message id that replies, edits and reactions reference.
+     */
+    async sendCommunityMessage(communityId, channel, content, options = {}) {
+        return this.requireCommunities().send(communityId, channel, content, options);
+    }
+    /** React to a community message. */
+    async reactInCommunity(communityId, channel, target, emoji, options = {}) {
+        return this.requireCommunities().react(communityId, channel, target, emoji, options);
+    }
+    /** Edit one of the bot's own community messages. */
+    async editCommunityMessage(communityId, channel, messageId, content) {
+        return this.requireCommunities().edit(communityId, channel, messageId, content);
+    }
+    /** Delete one of the bot's own community messages. */
+    async deleteCommunityMessage(communityId, channel, messageId) {
+        return this.requireCommunities().delete(communityId, channel, messageId);
+    }
+    /** Show a typing indicator in a community channel. */
+    async communityTyping(communityId, channel) {
+        return this.requireCommunities().typing(communityId, channel);
     }
     /** Every community the bot has accepted. */
     async getCommunities() {
@@ -462,6 +525,7 @@ export class VectorBotClient extends EventEmitter {
             clearInterval(this.connectionMonitor);
             this.connectionMonitor = undefined;
         }
+        this.communityRuntime?.stop();
         this.giftWrapSubscription?.close('shutdown');
         this.dmSubscription?.close('shutdown');
         this.groupSubscription?.close('shutdown');

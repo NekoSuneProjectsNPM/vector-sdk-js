@@ -16,4 +16,5 @@ export * from './mls-sidecar-adapter.js';
 export * from './subscription.js';
 export * from './upload.js';
 export * from './users.js';
+export * as concord from './concord/index.js';
 export * as kinds from './kinds.js';

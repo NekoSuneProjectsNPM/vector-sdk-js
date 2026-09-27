@@ -7,14 +7,14 @@
  * secret as the bot's own private key — so this store is written and protected
  * the same way.
  *
- * What this does **not** do is announce the join or read the channel. Both ride
- * the Concord v2 stream layer (HKDF-derived channel keys, the reversed seal/wrap
- * envelope, and consensus folding), which is not implemented in this package
- * yet. So a bot can accept, hold the keys, and be ready — but its membership is
- * not visible to the community and it cannot read or post until that lands.
+ * Reading, posting and the guestbook join live in `concord/` (the v2 stream
+ * layer); the client starts them for every community in this store. The
+ * control plane fold (live channel list, banlist) and rekeys are not
+ * implemented yet, so the channels are the ones the invite granted.
  */
 import { promises as fs } from 'fs';
 import path from 'path';
+import { verifyCommunityId } from './concord/derive.js';
 /** Default filename used when a directory is given instead of a file. */
 export const DEFAULT_COMMUNITIES_FILE = 'vector-bot-communities.json';
 export class CommunityStoreError extends Error {
@@ -118,6 +118,11 @@ export function communityFromInvite(invite, options) {
     if (options.expiresAt !== undefined && options.expiresAt <= now) {
         throw new InviteRejected('expired', `The invite to ${invite.name || invite.communityId} expired at ${new Date(options.expiresAt * 1000).toISOString()}.`);
     }
+    // The community id commits to (owner, salt); a bundle whose claimed owner
+    // does not reproduce it is forged or corrupt.
+    if (invite.owner && invite.ownerSalt && !verifyCommunityId(invite.communityId, invite.owner, invite.ownerSalt)) {
+        throw new InviteRejected('bad-community-id', `The invite to ${invite.name || invite.communityId} does not match its claimed owner; refusing it.`);
+    }
     if (!invite.accessKey) {
         throw new InviteRejected('no-access-key', `The invite to ${invite.communityId} carries no access key, so there is nothing to accept.`);
     }
@@ -133,6 +138,8 @@ export function communityFromInvite(invite, options) {
         relays: [...invite.relays],
         channels: invite.channels.map((channel) => ({ ...channel })),
         invitedBy: options.invitedBy,
+        inviteCreator: invite.creatorNpub,
+        inviteLabel: invite.label,
         joinedAt: new Date().toISOString(),
         announced: false,
     };
@@ -214,13 +221,7 @@ export class Community {
     get joinedAt() {
         return new Date(this.data.joinedAt);
     }
-    /**
-     * Whether the community can see the bot.
-     *
-     * False until the join is announced on the guestbook, which needs the
-     * Concord v2 stream layer. So a bot holds valid keys while remaining
-     * invisible to the room.
-     */
+    /** Whether the bot's join is on the community's guestbook, so members see it. */
     get announced() {
         return this.data.announced;
     }
@@ -241,6 +242,8 @@ export class Community {
     }
     /** Leave, discarding the stored keys. */
     async leave() {
+        // Best-effort: failing to say goodbye must not keep the bot in a community.
+        await this.context.beforeLeave?.(this.toJSON()).catch(() => undefined);
         const removed = await this.context.store.remove(this.id);
         if (removed) {
             this.context.onLeave?.(this.id);
@@ -260,10 +263,11 @@ export class Community {
  * what the client has actually seen.
  */
 export class CommunityManager {
-    constructor(store, onLeave, resolveUser) {
+    constructor(store, onLeave, resolveUser, beforeLeave) {
         this.store = store;
         this.onLeave = onLeave;
         this.resolveUser = resolveUser;
+        this.beforeLeave = beforeLeave;
         this.cache = new Collection();
     }
     get size() {
@@ -278,6 +282,7 @@ export class CommunityManager {
                 store: this.store,
                 onLeave: this.onLeave,
                 resolveUser: this.resolveUser,
+                beforeLeave: this.beforeLeave,
             }));
         }
         return this.cache;
@@ -300,6 +305,7 @@ export class CommunityManager {
             store: this.store,
             onLeave: this.onLeave,
             resolveUser: this.resolveUser,
+            beforeLeave: this.beforeLeave,
         });
         this.cache.set(communityId, community);
         return community;
@@ -321,9 +327,10 @@ export class CommunityManager {
  * The members of a community that this bot can actually see.
  *
  * **This is not the full member list, and it cannot be.** The complete roster
- * lives in the community's Guestbook, which is sealed under a key derived from
- * the community secret — reading it needs the Concord v2 stream layer, which
- * this package does not implement. What is knowable without it:
+ * lives in the community's Guestbook, and folding it correctly (snapshots
+ * after a refounding, kicks judged against the control plane's roster) is not
+ * implemented yet. Live joins and leaves arrive as `community_member_join` /
+ * `community_member_leave` events. What this list holds:
  *
  * - the **owner**, whose pubkey is in the invite bundle and which the community
  *   id is a hash commitment to, so it is self-certifying;

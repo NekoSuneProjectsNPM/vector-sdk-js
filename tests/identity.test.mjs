@@ -15,6 +15,8 @@ import {
   publicAccountInfo,
 } from '../dist/identity.js';
 import { contactTags, parseContactList } from '../dist/contacts.js';
+import { communityIdOf } from '../dist/concord/derive.js';
+import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import {
   buildInviteRumor,
   parseCommunityInvite,
@@ -322,9 +324,8 @@ const bundle = (over = {}) =>
 // A v2 bundle, in the wire-frozen shape a live Vector client actually sends:
 // community_root / root_epoch, an owner that the id self-certifies from, and
 // channel grants carrying their own keys.
-const v2Bundle = (over = {}) =>
-  JSON.stringify({
-    community_id: '248af5b6'.repeat(8),
+const v2Bundle = (over = {}) => {
+  const bundle = {
     owner: 'b5a263b1'.repeat(8),
     owner_salt: 'aabbccdd'.repeat(8),
     community_root: '11223344'.repeat(8),
@@ -335,7 +336,11 @@ const v2Bundle = (over = {}) =>
     channels: [{ id: 'ch'.repeat(32), key: 'kk'.repeat(32), epoch: 0, name: 'general' }],
     expires_at: Date.now() + 3600_000,
     ...over,
-  });
+  };
+  // The id must commit to (owner, salt), or accepting it is rightly refused.
+  bundle.community_id ??= bytesToHex(communityIdOf(hexToBytes(bundle.owner), hexToBytes(bundle.owner_salt)));
+  return JSON.stringify(bundle);
+};
 
 test('a well-formed invite parses', () => {
   const invite = parseCommunityInvite({

@@ -7,16 +7,16 @@
  * secret as the bot's own private key — so this store is written and protected
  * the same way.
  *
- * What this does **not** do is announce the join or read the channel. Both ride
- * the Concord v2 stream layer (HKDF-derived channel keys, the reversed seal/wrap
- * envelope, and consensus folding), which is not implemented in this package
- * yet. So a bot can accept, hold the keys, and be ready — but its membership is
- * not visible to the community and it cannot read or post until that lands.
+ * Reading, posting and the guestbook join live in `concord/` (the v2 stream
+ * layer); the client starts them for every community in this store. The
+ * control plane fold (live channel list, banlist) and rekeys are not
+ * implemented yet, so the channels are the ones the invite granted.
  */
 
 import { promises as fs } from 'fs';
 import path from 'path';
 
+import { verifyCommunityId } from './concord/derive.js';
 import type { CommunityInvite, InviteChannel, InviteProtocol } from './invites.js';
 
 /** Default filename used when a directory is given instead of a file. */
@@ -40,14 +40,18 @@ export interface JoinedCommunity {
   channels: InviteChannel[];
   /** Who invited the bot, hex — the seal-verified sender, not a claim. */
   invitedBy: string;
+  /** The invite's creator as the bundle names it, echoed in the guestbook join (v2). */
+  inviteCreator?: string;
+  /** The invite's label, echoed in the guestbook join (v2). */
+  inviteLabel?: string;
   /** When the invite was accepted, ISO 8601. */
   joinedAt: string;
   /**
-   * False until the bot has announced itself to the community's guestbook.
+   * Whether the bot's join is on the community's guestbook.
    *
-   * Always false today: announcing needs the v2 stream layer. Recorded so a
-   * later release can find the communities still owing an announcement rather
-   * than silently treating them as fully joined.
+   * Set once the join is published, or once an existing join by this account
+   * is found there. Only a first join speaks: re-announcing shows as
+   * "<bot> has joined" to the whole community.
    */
   announced: boolean;
 }
@@ -143,7 +147,7 @@ export class CommunityStore {
 }
 
 /** Why an invite could not be accepted. */
-export type AcceptRefusal = 'expired' | 'no-access-key';
+export type AcceptRefusal = 'expired' | 'no-access-key' | 'bad-community-id';
 
 export class InviteRejected extends Error {
   constructor(
@@ -172,6 +176,14 @@ export function communityFromInvite(
       `The invite to ${invite.name || invite.communityId} expired at ${new Date(options.expiresAt * 1000).toISOString()}.`,
     );
   }
+  // The community id commits to (owner, salt); a bundle whose claimed owner
+  // does not reproduce it is forged or corrupt.
+  if (invite.owner && invite.ownerSalt && !verifyCommunityId(invite.communityId, invite.owner, invite.ownerSalt)) {
+    throw new InviteRejected(
+      'bad-community-id',
+      `The invite to ${invite.name || invite.communityId} does not match its claimed owner; refusing it.`,
+    );
+  }
   if (!invite.accessKey) {
     throw new InviteRejected(
       'no-access-key',
@@ -191,6 +203,8 @@ export function communityFromInvite(
     relays: [...invite.relays],
     channels: invite.channels.map((channel) => ({ ...channel })),
     invitedBy: options.invitedBy,
+    inviteCreator: invite.creatorNpub,
+    inviteLabel: invite.label,
     joinedAt: new Date().toISOString(),
     announced: false,
   };
@@ -247,6 +261,8 @@ export class Collection<K, V> extends Map<K, V> {
 export interface CommunityContext {
   store: CommunityStore;
   onLeave?: (communityId: string) => void;
+  /** Runs before the keys are discarded, e.g. to publish the guestbook leave. */
+  beforeLeave?: (community: JoinedCommunity) => Promise<void>;
   /** Resolves a pubkey to a profile, so members can carry user info. */
   resolveUser?: (pubkey: string) => Promise<unknown>;
 }
@@ -299,13 +315,7 @@ export class Community {
     return new Date(this.data.joinedAt);
   }
 
-  /**
-   * Whether the community can see the bot.
-   *
-   * False until the join is announced on the guestbook, which needs the
-   * Concord v2 stream layer. So a bot holds valid keys while remaining
-   * invisible to the room.
-   */
+  /** Whether the bot's join is on the community's guestbook, so members see it. */
   public get announced(): boolean {
     return this.data.announced;
   }
@@ -329,6 +339,8 @@ export class Community {
 
   /** Leave, discarding the stored keys. */
   public async leave(): Promise<boolean> {
+    // Best-effort: failing to say goodbye must not keep the bot in a community.
+    await this.context.beforeLeave?.(this.toJSON()).catch(() => undefined);
     const removed = await this.context.store.remove(this.id);
     if (removed) {
       this.context.onLeave?.(this.id);
@@ -356,6 +368,7 @@ export class CommunityManager {
     private readonly store: CommunityStore,
     private readonly onLeave?: (communityId: string) => void,
     private readonly resolveUser?: (pubkey: string) => Promise<unknown>,
+    private readonly beforeLeave?: (community: JoinedCommunity) => Promise<void>,
   ) {}
 
   public get size(): number {
@@ -373,6 +386,7 @@ export class CommunityManager {
           store: this.store,
           onLeave: this.onLeave,
           resolveUser: this.resolveUser,
+          beforeLeave: this.beforeLeave,
         }),
       );
     }
@@ -398,6 +412,7 @@ export class CommunityManager {
       store: this.store,
       onLeave: this.onLeave,
       resolveUser: this.resolveUser,
+      beforeLeave: this.beforeLeave,
     });
     this.cache.set(communityId, community);
     return community;
@@ -445,9 +460,10 @@ export interface CommunityMember<TUser = unknown> {
  * The members of a community that this bot can actually see.
  *
  * **This is not the full member list, and it cannot be.** The complete roster
- * lives in the community's Guestbook, which is sealed under a key derived from
- * the community secret — reading it needs the Concord v2 stream layer, which
- * this package does not implement. What is knowable without it:
+ * lives in the community's Guestbook, and folding it correctly (snapshots
+ * after a refounding, kicks judged against the control plane's roster) is not
+ * implemented yet. Live joins and leaves arrive as `community_member_join` /
+ * `community_member_leave` events. What this list holds:
  *
  * - the **owner**, whose pubkey is in the invite bundle and which the community
  *   id is a hash commitment to, so it is self-certifying;
