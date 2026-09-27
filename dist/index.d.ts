@@ -17,5 +17,6 @@ export * from './subscription.js';
 export * from './upload.js';
 export * from './users.js';
 export type { CommunityMessage, CommunitySendResult, LiveChannel } from './concord/runtime.js';
+export type { CommunityAttachment } from './concord/attachments.js';
 export * as concord from './concord/index.js';
 export * as kinds from './kinds.js';

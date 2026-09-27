@@ -11,6 +11,17 @@ changed in each version.
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-09-27
+
+### Added
+
+- **Community attachments.** Each `community_message` carries its files
+  (`attachments`, parsed from NIP-92 `imeta` tags the way vector-core writes
+  them) and a `download()` that fetches the ciphertext, tries the sender's
+  mirrors if the primary fails, decrypts it, and checks it against the stated
+  plaintext hash, with a size cap. Blob URLs some clients also paste into the
+  caption are stripped from `content`.
+
 ## [1.3.1] - 2026-09-27
 
 Concord v2: a bot can now join a community and read and post in it. Until this,
@@ -391,7 +402,8 @@ Never tagged or published; superseded by 1.1.0.
   metadata builders, AES-256-GCM file encryption, NIP-96 upload, and the
   `VectorBotClient` / `VectorBot` / `Channel` surface, with a demo script.
 
-[unreleased]: https://github.com/NekoSuneProjectsNPM/vector-sdk-js/compare/v1.3.1...HEAD
+[unreleased]: https://github.com/NekoSuneProjectsNPM/vector-sdk-js/compare/v1.3.2...HEAD
+[1.3.2]: https://github.com/NekoSuneProjectsNPM/vector-sdk-js/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/NekoSuneProjectsNPM/vector-sdk-js/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/NekoSuneProjectsNPM/vector-sdk-js/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.1.1...v1.2.0

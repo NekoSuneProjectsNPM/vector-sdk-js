@@ -14,6 +14,7 @@
  */
 import type { Event, SimplePool } from 'nostr-tools';
 import type { JoinedCommunity } from '../communities.js';
+import type { CommunityAttachment } from './attachments.js';
 import type { GroupKey } from './derive.js';
 import type { Rumor } from './stream.js';
 /** What the runtime needs from its client. */
@@ -51,7 +52,10 @@ export interface CommunityMessage {
     channelName?: string;
     /** Author pubkey, hex (the seal-verified signer). */
     author: string;
+    /** The caption, with any inlined attachment blob URLs removed. */
     content: string;
+    /** Files carried as NIP-92 imeta tags (encrypted; use {@link download}). */
+    attachments: CommunityAttachment[];
     /** True send time in ms. */
     createdAt: number;
     /** Kind 9 (message) or 1111 (threaded comment). */
@@ -66,6 +70,10 @@ export interface CommunityMessage {
     reply(content: string): Promise<CommunitySendResult>;
     /** React to this message. */
     react(emoji: string): Promise<CommunitySendResult>;
+    /** Download and decrypt one of this message's attachments. */
+    download(attachment: CommunityAttachment, options?: {
+        maxBytes?: number;
+    }): Promise<Buffer>;
 }
 /**
  * Resolve an invite's channel grants to their keys (CORD-03 §1): a public
