@@ -362,6 +362,29 @@ import { kinds } from '@nekosuneprojects/vector-sdk';
 kinds.isCommunityKind(event.kind); // true for 3300-3311
 ```
 
+## Fixing a wrongly-set bot badge
+
+Vector only re-evaluates its bot badge when a profile **contains** a `bot`
+field. A profile that simply omits it leaves the existing flag alone — so an
+account wrongly marked as a bot cannot be fixed by removing the field. The only
+thing that clears it is publishing `"bot": false`.
+
+```bash
+# Dry run first — shows exactly what would change, publishes nothing.
+node scripts/fix-bot-flag.mjs --nsec nsec1...
+
+# Then publish.
+node scripts/fix-bot-flag.mjs --nsec nsec1... --yes
+```
+
+It reads your current profile, writes it back with only `bot` changed, and
+leaves every other field exactly as it was. Pass the key via `$VECTOR_NSEC`
+instead of `--nsec` to keep it out of your shell history. In code:
+`await client.setBotFlag(false)`.
+
+To avoid the problem: pass `bot: false` when running under a human's key, or
+`publishProfile: false` to leave the profile alone entirely.
+
 ## Building and testing
 
 ```bash

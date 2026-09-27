@@ -39,6 +39,21 @@ release.
 
 ### Fixed
 
+- **Connecting with a key overwrote that account's profile.** `VectorBot.new()`
+  published a kind-0 on every connect, and kind 0 is *replaceable* — a publish
+  replaces the whole profile. Anyone who ran the SDK or CLI with a personal key
+  had their name, picture and bio erased and replaced with the bot defaults, and
+  was stamped `bot: true`. Publishing now merges over what the account already
+  has, `publishProfile: false` skips it, and `bot: false` keeps a human account
+  unflagged.
+- **A wrongly-set bot badge could not be cleared.** Vector only re-evaluates the
+  badge when a profile *contains* a `bot` field; one that omits it leaves the
+  existing flag untouched. So removing the field does nothing — only publishing
+  `bot: false` clears it. `client.setBotFlag(false)` does that while carrying
+  every other field over, and `scripts/fix-bot-flag.mjs` is a standalone version
+  for an account that never goes near the SDK. `metadataToContent()` keeps a
+  `false` value rather than dropping it as empty, since dropping it would make
+  the badge unclearable.
 - **Community invites from current Vector clients were invisible.** Invites were
   read as kind 3304, the *v1* bundle; a modern client sends a Concord v2 Direct
   Invite, **kind 3313**, in a different wire-frozen shape (`community_root` /

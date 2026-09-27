@@ -93,7 +93,7 @@ export class VectorBotClient extends EventEmitter {
             selfWrap: this.options.selfWrap,
             useInboxRelays: this.options.useInboxRelays,
             discoveryRelays: this.options.discoveryRelays,
-        });
+        }, { bot: this.options.bot, publishProfile: this.options.publishProfile });
         this.bot = bot;
         this.log('Connected. Bot public key:', bot.publicKey);
         await this.publishInterfaceManifest(bot);

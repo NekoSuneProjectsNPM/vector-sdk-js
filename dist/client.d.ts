@@ -42,7 +42,34 @@ export declare class VectorClient {
     readonly inboxRelays: InboxRelayResolver;
     private readonly publishRetries;
     constructor(keys: string, config?: ClientConfig);
-    setMetadata(metadata: Metadata): Promise<void>;
+    /**
+     * Fetch this account's currently published profile, if it has one.
+     *
+     * Kind 0 is replaceable, so this is the whole profile — there is no partial
+     * update on the wire, and publishing replaces everything.
+     */
+    fetchOwnProfile(): Promise<Record<string, unknown> | null>;
+    /**
+     * Publish this account's profile.
+     *
+     * Kind 0 replaces wholesale, so publishing a partial profile *erases*
+     * everything left out. `merge` (the default) reads what is already published
+     * and writes the new fields over it, which is what stops a bot connecting
+     * with a human's key from wiping that person's name, picture and bio.
+     */
+    setMetadata(metadata: Metadata, options?: {
+        merge?: boolean;
+    }): Promise<void>;
+    /**
+     * Publish the account's existing profile with `bot` set explicitly.
+     *
+     * Vector only re-evaluates its badge when the `bot` field is present, so an
+     * account wrongly flagged cannot be cleared by removing the field — the flag
+     * simply persists. Writing `bot: false` is the only thing that clears it.
+     *
+     * Every other field is carried over untouched.
+     */
+    setBotFlag(bot: boolean): Promise<Record<string, unknown>>;
     /**
      * Publish this bot's own NIP-17 inbox relay list, so other clients know where
      * to deliver its gift wraps instead of guessing.

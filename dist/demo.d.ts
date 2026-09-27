@@ -60,6 +60,19 @@ export type BotClientOptions = {
      * least one command is registered.
      */
     publishManifest?: boolean;
+    /**
+     * Whether to advertise the account as a bot. On by default.
+     *
+     * Set false when running under a human's key: Vector only re-evaluates its
+     * badge when a profile carries the field, so a wrongly-set flag persists
+     * until something publishes `bot: false`.
+     */
+    bot?: boolean;
+    /**
+     * Publish the kind-0 profile on connect. On by default, and it merges over
+     * the existing profile rather than replacing it.
+     */
+    publishProfile?: boolean;
 };
 export type MlsDecryptedMessage = {
     groupId: string;

@@ -2,6 +2,7 @@ import { SimplePool, Event } from 'nostr-tools';
 import { finalizeEvent, getPublicKey } from 'nostr-tools/pure';
 import WebSocket from 'ws';
 import type { Metadata } from './metadata.js';
+import { metadataToContent } from './metadata.js';
 import { normalizePrivateKey } from './keys.js';
 import { buildInboxRelayList, InboxRelayResolver } from './inbox-relays.js';
 import { DISCOVERY_RELAYS } from './bot-interface.js';
@@ -86,18 +87,95 @@ export class VectorClient {
     );
   }
 
-  public async setMetadata(metadata: Metadata): Promise<void> {
+  /**
+   * Fetch this account's currently published profile, if it has one.
+   *
+   * Kind 0 is replaceable, so this is the whole profile — there is no partial
+   * update on the wire, and publishing replaces everything.
+   */
+  public async fetchOwnProfile(): Promise<Record<string, unknown> | null> {
+    const relays = Array.from(new Set([...this.relays, ...this.discoveryRelays]));
+    let event: Event | null = null;
+    try {
+      event = await Promise.race([
+        this.pool.get(relays, { kinds: [0], authors: [this.publicKey], limit: 1 }),
+        new Promise<null>((resolve) => {
+          setTimeout(() => resolve(null), 4000);
+        }),
+      ]);
+    } catch {
+      return null;
+    }
+
+    if (!event?.content) {
+      return null;
+    }
+    try {
+      return JSON.parse(event.content) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Publish this account's profile.
+   *
+   * Kind 0 replaces wholesale, so publishing a partial profile *erases*
+   * everything left out. `merge` (the default) reads what is already published
+   * and writes the new fields over it, which is what stops a bot connecting
+   * with a human's key from wiping that person's name, picture and bio.
+   */
+  public async setMetadata(
+    metadata: Metadata,
+    options: { merge?: boolean } = {},
+  ): Promise<void> {
+    let content = metadataToContent(metadata);
+
+    if (options.merge !== false) {
+      const existing = await this.fetchOwnProfile();
+      if (existing) {
+        const incoming = JSON.parse(content) as Record<string, unknown>;
+        content = JSON.stringify({ ...existing, ...incoming });
+      }
+    }
+
+    const event: Event = finalizeEvent(
+      { kind: 0, created_at: Math.floor(Date.now() / 1000), tags: [], content },
+      this.privateKeyBytes,
+    );
+
+    await this.publish(event, this.relays, this.publishRetries);
+  }
+
+  /**
+   * Publish the account's existing profile with `bot` set explicitly.
+   *
+   * Vector only re-evaluates its badge when the `bot` field is present, so an
+   * account wrongly flagged cannot be cleared by removing the field — the flag
+   * simply persists. Writing `bot: false` is the only thing that clears it.
+   *
+   * Every other field is carried over untouched.
+   */
+  public async setBotFlag(bot: boolean): Promise<Record<string, unknown>> {
+    const existing = (await this.fetchOwnProfile()) ?? {};
+    const content = { ...existing, bot };
+
     const event: Event = finalizeEvent(
       {
         kind: 0,
         created_at: Math.floor(Date.now() / 1000),
         tags: [],
-        content: JSON.stringify(metadata),
+        content: JSON.stringify(content),
       },
       this.privateKeyBytes,
     );
 
-    await this.publish(event, this.relays, this.publishRetries);
+    await this.publish(
+      event,
+      Array.from(new Set([...this.relays, ...this.discoveryRelays])),
+      this.publishRetries,
+    );
+    return content;
   }
 
   /**

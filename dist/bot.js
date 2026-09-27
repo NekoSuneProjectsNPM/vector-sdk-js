@@ -109,16 +109,23 @@ export class VectorBot {
     static async quick(privateKey) {
         return VectorBot.new(privateKey, 'vector bot', 'Vector Bot', 'vector bot created with quick', 'https://example.com/avatar.png', 'https://example.com/banner.png', 'example@example.com', 'example@example.com');
     }
-    static async new(privateKey, name, displayName, about, picture, banner, nip05, lud16, clientConfig) {
+    static async new(privateKey, name, displayName, about, picture, banner, nip05, lud16, clientConfig, options = {}) {
         const resolvedPicture = sanitizeUrl(picture, 'https://example.com/avatar.png');
         const resolvedBanner = sanitizeUrl(banner, 'https://example.com/banner.png');
         const client = buildClient(privateKey, clientConfig);
-        const metadata = createMetadata(name, displayName, about, resolvedPicture, resolvedBanner, nip05, lud16);
-        try {
-            await client.setMetadata(metadata);
-        }
-        catch (error) {
-            console.error('Failed to set metadata', error);
+        const metadata = createMetadata(name, displayName, about, resolvedPicture, resolvedBanner, nip05, lud16, options.bot !== false);
+        // Publishing merges over whatever the account already has, rather than
+        // replacing it. Kind 0 is replaceable, so a plain publish would erase the
+        // name, picture and bio of anyone who ran this with a personal key — and
+        // stamp them as a bot, which Vector will not un-badge until something
+        // publishes `bot: false`.
+        if (options.publishProfile !== false) {
+            try {
+                await client.setMetadata(metadata);
+            }
+            catch (error) {
+                console.error('Failed to set metadata', error);
+            }
         }
         // Advertise where this bot wants its gift wraps delivered, so other clients
         // can route to it instead of guessing at its relay set.
