@@ -19,7 +19,7 @@
 
 import type { Event } from 'nostr-tools';
 
-import { COMMUNITY_INVITE_BUNDLE } from './kinds.js';
+import { COMMUNITY_DIRECT_INVITE, COMMUNITY_INVITE_BUNDLE } from './kinds.js';
 
 /**
  * How long a direct invite stays valid, in seconds.
@@ -39,28 +39,67 @@ export const MAX_INVITE_RELAYS = 5;
 export const MAX_INVITE_CHANNELS = 64;
 export const MAX_INVITE_BYTES = 256 * 1024;
 
+/** Concord v2 caps, from `vector_core::community::v2::invite`. */
+export const MAX_BUNDLE_CHANNELS = 256;
+export const MAX_BOOTSTRAP_RELAYS = 3;
+export const MAX_BUNDLE_EPOCH = 2 ** 40;
+
 export class InviteError extends Error {}
 
-/** One channel described by an invite bundle. */
+/**
+ * One channel described by an invite bundle.
+ *
+ * In a v2 bundle this is a *grant*: `key` is the channel's actual access key,
+ * so a channel listed with one is a channel the invite lets you read.
+ */
 export interface InviteChannel {
   id: string;
   name?: string;
   epoch?: number;
   isPrivate?: boolean;
+  /** Channel key (v2 grants only). Secret. */
+  key?: string;
 }
 
-/** A community invite bundle, as carried by a kind-3304 rumor. */
+/**
+ * Which protocol generation an invite came from.
+ *
+ * `v2` (kind 3313) is what a current Vector app sends. `v1` (kind 3304) is the
+ * older bundle. Both are read here; only the shape of the JSON differs.
+ */
+export type InviteProtocol = 'v1' | 'v2';
+
+/** A community invite bundle. */
 export interface CommunityInvite {
+  /** Which generation of the protocol issued this invite. */
+  protocol: InviteProtocol;
   communityId: string;
   name: string;
-  /** The community's server-root key. Secret — this is what grants access. */
-  serverRootKey: string;
-  /** The server root's current epoch, so a joiner adopts the right read clock. */
-  serverRootEpoch: number;
+  /**
+   * The base access key. Secret — this is what the bundle actually grants.
+   *
+   * `server_root_key` in a v1 bundle, `community_root` in a v2 one. The two
+   * generations name it differently on the wire; this is the common handle.
+   */
+  accessKey: string;
+  /** The epoch that `accessKey` belongs to, so a joiner reads at the right clock. */
+  epoch: number;
+  /** Owner x-only pubkey, hex (v2). The community id self-certifies from it. */
+  owner?: string;
+  /** Owner salt, hex (v2). */
+  ownerSalt?: string;
+  /** The control plane's signer pubkey at `epoch` (v2, optional). */
+  controlPk?: string;
+  /** Who created the invite, echoed in the joiner's guestbook entry (v2). */
+  creatorNpub?: string;
+  /** Free-text label the inviter attached (v2). */
+  label?: string;
   relays: string[];
   channels: InviteChannel[];
   /** Signed event JSON proving who the owner is, when the sender included it. */
   ownerAttestation?: string;
+  /** The bundle's own deadline in Unix MILLISECONDS, when it declares one (v2). */
+  expiresAtMs?: number;
   /** The raw bundle, exactly as it arrived. Forwarding re-sends this verbatim. */
   raw: Record<string, unknown>;
 }
@@ -105,7 +144,13 @@ export function parseCommunityInvite(rumor: {
   kind: number;
   content: string;
 }): CommunityInvite | null {
-  if (rumor.kind !== COMMUNITY_INVITE_BUNDLE) {
+  const protocol: InviteProtocol | null =
+    rumor.kind === COMMUNITY_DIRECT_INVITE
+      ? 'v2'
+      : rumor.kind === COMMUNITY_INVITE_BUNDLE
+        ? 'v1'
+        : null;
+  if (!protocol) {
     return null;
   }
   if (!rumor.content || Buffer.byteLength(rumor.content, 'utf8') > MAX_INVITE_BYTES) {
@@ -123,11 +168,32 @@ export function parseCommunityInvite(rumor: {
   }
 
   const communityId = boundedString(parsed.community_id ?? parsed.communityId, 256);
-  const serverRootKey = boundedString(parsed.server_root_key ?? parsed.serverRootKey, 1024);
-  if (!communityId || !serverRootKey) {
-    return null; // without these the bundle grants nothing
+  if (!communityId) {
+    return null;
   }
 
+  // The two generations name the access key differently on the wire, and the
+  // names are frozen — Soapbox and Armada read the same bytes, so a rename is a
+  // silent cross-client join failure. Read both, expose one.
+  const accessKey =
+    protocol === 'v2'
+      ? boundedString(parsed.community_root ?? parsed.communityRoot, 1024)
+      : boundedString(parsed.server_root_key ?? parsed.serverRootKey, 1024);
+
+  if (!accessKey) {
+    return null; // without it the bundle grants nothing
+  }
+
+  const rawEpoch =
+    protocol === 'v2'
+      ? (parsed.root_epoch ?? parsed.rootEpoch)
+      : (parsed.server_root_epoch ?? parsed.serverRootEpoch);
+  const epoch =
+    typeof rawEpoch === 'number' && rawEpoch >= 0 && rawEpoch <= MAX_BUNDLE_EPOCH
+      ? rawEpoch
+      : 0;
+
+  const relayCap = protocol === 'v2' ? MAX_BOOTSTRAP_RELAYS : MAX_INVITE_RELAYS;
   const rawRelays = Array.isArray(parsed.relays) ? parsed.relays : [];
   const relays: string[] = [];
   const seenRelays = new Set<string>();
@@ -138,14 +204,17 @@ export function parseCommunityInvite(rumor: {
     }
     seenRelays.add(relay);
     relays.push(relay);
-    if (relays.length >= MAX_INVITE_RELAYS) {
+    if (relays.length >= relayCap) {
       break;
     }
   }
 
+  // A v2 bundle may omit `channels` entirely when it vends no keys. Treating a
+  // missing list as fatal would turn a keyless invite into a parse failure.
+  const channelCap = protocol === 'v2' ? MAX_BUNDLE_CHANNELS : MAX_INVITE_CHANNELS;
   const rawChannels = Array.isArray(parsed.channels) ? parsed.channels : [];
   const channels: InviteChannel[] = [];
-  for (const entry of rawChannels.slice(0, MAX_INVITE_CHANNELS)) {
+  for (const entry of rawChannels.slice(0, channelCap)) {
     if (!entry || typeof entry !== 'object') {
       continue;
     }
@@ -158,6 +227,7 @@ export function parseCommunityInvite(rumor: {
       id,
       name: boundedString(channel.name, 256),
       epoch: typeof channel.epoch === 'number' ? channel.epoch : undefined,
+      key: boundedString(channel.key, 1024),
       isPrivate:
         typeof channel.is_private === 'boolean'
           ? channel.is_private
@@ -167,21 +237,31 @@ export function parseCommunityInvite(rumor: {
     });
   }
 
-  const epoch = parsed.server_root_epoch ?? parsed.serverRootEpoch;
+  // A v2 bundle declares its own deadline in MILLISECONDS, alongside (and
+  // sometimes instead of) the wrap's NIP-40 tag in seconds.
+  const expiresAtMs = parsed.expires_at ?? parsed.expiresAt;
 
   return {
+    protocol,
     communityId,
     name: boundedString(parsed.name, 256) ?? '',
-    serverRootKey,
-    serverRootEpoch: typeof epoch === 'number' ? epoch : 0,
+    accessKey,
+    epoch,
+    owner: boundedString(parsed.owner, 128),
+    ownerSalt: boundedString(parsed.owner_salt ?? parsed.ownerSalt, 128),
+    controlPk: boundedString(parsed.control_pk ?? parsed.controlPk, 128),
+    creatorNpub: boundedString(parsed.creator_npub ?? parsed.creatorNpub, 128),
+    label: boundedString(parsed.label, 256),
     relays,
     channels,
     ownerAttestation: boundedString(
       parsed.owner_attestation ?? parsed.ownerAttestation,
       MAX_INVITE_BYTES,
     ),
+    expiresAtMs: typeof expiresAtMs === 'number' ? expiresAtMs : undefined,
     raw: parsed,
   };
+
 }
 
 /**
@@ -200,7 +280,14 @@ export function readInviteRumor(
     return null;
   }
 
-  const expiresAt = expirationSeconds(rumor.tags);
+  // The wrap's NIP-40 tag is in seconds; a v2 bundle also states its own
+  // deadline in milliseconds. Either can be absent, so take whichever is
+  // present and prefer the tag when both are.
+  const fromTag = expirationSeconds(rumor.tags);
+  const fromBundle =
+    invite.expiresAtMs !== undefined ? Math.floor(invite.expiresAtMs / 1000) : undefined;
+  const expiresAt = fromTag ?? fromBundle;
+
   return {
     invite,
     senderPubkey: rumor.pubkey,
@@ -226,18 +313,18 @@ export function buildInviteRumor(
   const expiresAt = options.expiresAt ?? now + DIRECT_INVITE_EXPIRY_SECS;
 
   return {
-    kind: COMMUNITY_INVITE_BUNDLE,
+    kind: invite.protocol === 'v2' ? COMMUNITY_DIRECT_INVITE : COMMUNITY_INVITE_BUNDLE,
     created_at: now,
     tags: [['expiration', Math.floor(expiresAt).toString()]],
     content: JSON.stringify(invite.raw),
   };
 }
 
-/** True when `event` is a gift wrap that might carry an invite. */
+/** True when `kind` is either generation's invite. */
 export function isInviteKind(kind: number): boolean {
-  return kind === COMMUNITY_INVITE_BUNDLE;
+  return kind === COMMUNITY_INVITE_BUNDLE || kind === COMMUNITY_DIRECT_INVITE;
 }
 
-/** Re-export so callers can filter on the kind without a second import. */
-export { COMMUNITY_INVITE_BUNDLE };
+/** Re-export so callers can filter on the kinds without a second import. */
+export { COMMUNITY_INVITE_BUNDLE, COMMUNITY_DIRECT_INVITE };
 export type { Event };

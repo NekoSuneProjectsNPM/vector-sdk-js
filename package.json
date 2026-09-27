@@ -1,6 +1,6 @@
 {
   "name": "@nekosuneprojects/vector-sdk",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Node.js implementation of the Vector Bot SDK: NIP-17 messaging, files, and slash commands",
   "type": "module",
   "main": "dist/index.js",
@@ -8,12 +8,13 @@
   "files": [
     "dist",
     "bin",
+    "scripts",
     "RELEASING.txt"
   ],
   "scripts": {
     "build": "tsc",
     "prepack": "npm run build",
-    "test": "npm run build && node tests/bot-interface.parity.mjs && node tests/identity.test.mjs"
+    "test": "npm run build && node tests/bot-interface.parity.mjs && node tests/giftwrap.test.mjs && node tests/identity.test.mjs"
   },
   "repository": {
     "type": "git",

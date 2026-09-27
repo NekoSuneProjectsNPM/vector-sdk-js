@@ -84,7 +84,10 @@ export declare class VectorBot {
     readonly client: VectorClient;
     private constructor();
     static quick(privateKey: string): Promise<VectorBot>;
-    static new(privateKey: string, name: string, displayName: string, about: string, picture: string, banner: string, nip05: string, lud16: string, clientConfig?: ClientConfig): Promise<VectorBot>;
+    static new(privateKey: string, name: string, displayName: string, about: string, picture: string, banner: string, nip05: string, lud16: string, clientConfig?: ClientConfig, options?: {
+        bot?: boolean;
+        publishProfile?: boolean;
+    }): Promise<VectorBot>;
     getChat(recipient: string): Channel;
     /** Alias for {@link getChat}, matching the Rust SDK's `bot.dm(npub)`. */
     dm(recipient: string): Channel;

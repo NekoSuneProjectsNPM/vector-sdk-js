@@ -21,7 +21,18 @@ import {
   readInviteRumor,
   MAX_INVITE_RELAYS,
 } from '../dist/invites.js';
-import { COMMUNITY_INVITE_BUNDLE, CONTACT_LIST } from '../dist/kinds.js';
+import {
+  COMMUNITY_DIRECT_INVITE,
+  COMMUNITY_INVITE_BUNDLE,
+  CONTACT_LIST,
+} from '../dist/kinds.js';
+import {
+  CommunityManager,
+  CommunityStore,
+  communityFromInvite,
+  InviteRejected,
+} from '../dist/communities.js';
+import { parseProfile, User } from '../dist/users.js';
 import { getPublicKey } from 'nostr-tools/pure';
 import { nip19 } from 'nostr-tools';
 
@@ -296,6 +307,7 @@ test('a non-contact-list event yields nothing', () => {
 
 // ── invites ──────────────────────────────────────────────────────────────────
 
+// A v1 bundle: server_root_key / server_root_epoch.
 const bundle = (over = {}) =>
   JSON.stringify({
     community_id: 'comm-123',
@@ -307,6 +319,24 @@ const bundle = (over = {}) =>
     ...over,
   });
 
+// A v2 bundle, in the wire-frozen shape a live Vector client actually sends:
+// community_root / root_epoch, an owner that the id self-certifies from, and
+// channel grants carrying their own keys.
+const v2Bundle = (over = {}) =>
+  JSON.stringify({
+    community_id: '248af5b6'.repeat(8),
+    owner: 'b5a263b1'.repeat(8),
+    owner_salt: 'aabbccdd'.repeat(8),
+    community_root: '11223344'.repeat(8),
+    root_epoch: 0,
+    control_pk: 'ccddeeff'.repeat(8),
+    name: 'NekoSune Community',
+    relays: ['wss://jskitty.cat/nostr', 'wss://relay.damus.io', 'wss://nos.lol'],
+    channels: [{ id: 'ch'.repeat(32), key: 'kk'.repeat(32), epoch: 0, name: 'general' }],
+    expires_at: Date.now() + 3600_000,
+    ...over,
+  });
+
 test('a well-formed invite parses', () => {
   const invite = parseCommunityInvite({
     kind: COMMUNITY_INVITE_BUNDLE,
@@ -315,7 +345,8 @@ test('a well-formed invite parses', () => {
   assert.ok(invite);
   assert.equal(invite.communityId, 'comm-123');
   assert.equal(invite.name, 'Test Community');
-  assert.equal(invite.serverRootEpoch, 3);
+  assert.equal(invite.epoch, 3);
+  assert.equal(invite.protocol, 'v1');
   assert.equal(invite.relays.length, 2);
   assert.equal(invite.channels[0].name, 'general');
 });
@@ -332,6 +363,72 @@ test('a non-invite kind or malformed bundle yields null, never a throw', () => {
     }),
     null,
   );
+});
+
+test('a real v2 bundle (kind 3313) parses', () => {
+  const invite = parseCommunityInvite({
+    kind: COMMUNITY_DIRECT_INVITE,
+    content: v2Bundle(),
+  });
+  assert.ok(invite, 'the shape a live Vector client sends must parse');
+  assert.equal(invite.protocol, 'v2');
+  assert.equal(invite.name, 'NekoSune Community');
+  // v2 names the access key community_root, not server_root_key.
+  assert.equal(invite.accessKey, '11223344'.repeat(8));
+  assert.equal(invite.epoch, 0);
+  assert.equal(invite.owner, 'b5a263b1'.repeat(8));
+  assert.ok(invite.ownerSalt, 'the salt the community id certifies from');
+  assert.ok(invite.controlPk);
+  assert.equal(invite.channels.length, 1);
+  assert.ok(invite.channels[0].key, 'a channel grant carries its key');
+  assert.ok(invite.expiresAtMs > Date.now(), 'the bundle states its own deadline in ms');
+});
+
+test('a v2 bundle read as v1 fails, and vice versa', () => {
+  // The field names are wire-frozen and differ between generations, so reading
+  // one shape with the other rules must not half-succeed.
+  assert.equal(
+    parseCommunityInvite({ kind: COMMUNITY_INVITE_BUNDLE, content: v2Bundle() }),
+    null,
+  );
+  assert.equal(
+    parseCommunityInvite({ kind: COMMUNITY_DIRECT_INVITE, content: bundle() }),
+    null,
+  );
+});
+
+test('a v2 bundle with no channels still parses', () => {
+  // armada omits `channels` when the bundle vends no keys; a required list
+  // would turn a keyless invite into a join failure.
+  const invite = parseCommunityInvite({
+    kind: COMMUNITY_DIRECT_INVITE,
+    content: v2Bundle({ channels: undefined }),
+  });
+  assert.ok(invite);
+  assert.equal(invite.channels.length, 0);
+});
+
+test('a v2 invite takes its expiry from the bundle when the wrap has no tag', () => {
+  const now = Math.floor(Date.now() / 1000);
+  const received = readInviteRumor(
+    {
+      kind: COMMUNITY_DIRECT_INVITE,
+      content: v2Bundle({ expires_at: (now + 600) * 1000 }),
+      tags: [],
+      pubkey: 'ab'.repeat(32),
+    },
+    now,
+  );
+  assert.equal(received.expiresAt, now + 600, 'ms in the bundle become seconds');
+  assert.equal(received.expired, false);
+});
+
+test('forwarding a v2 invite keeps kind 3313', () => {
+  const invite = parseCommunityInvite({
+    kind: COMMUNITY_DIRECT_INVITE,
+    content: v2Bundle(),
+  });
+  assert.equal(buildInviteRumor(invite).kind, COMMUNITY_DIRECT_INVITE);
 });
 
 test('a hostile relay list is capped', () => {
@@ -383,6 +480,149 @@ test('forwarding re-sends the bundle verbatim and cannot extend its life', () =>
   assert.deepEqual(rumor.tags[0], ['expiration', String(deadline)]);
   // The bundle is the community's key material, not ours to rewrite.
   assert.deepEqual(JSON.parse(rumor.content), JSON.parse(bundle()));
+});
+
+// ── accepting invites ────────────────────────────────────────────────────────
+
+test('accepting an invite keeps the vended keys', async () => {
+  const invite = parseCommunityInvite({ kind: COMMUNITY_DIRECT_INVITE, content: v2Bundle() });
+  const store = new CommunityStore(path.join(tmp, 'communities.json'));
+
+  const joined = communityFromInvite(invite, { invitedBy: 'ab'.repeat(32) });
+  await store.put(joined);
+
+  const back = await store.get(invite.communityId);
+  assert.ok(back);
+  assert.equal(back.accessKey, invite.accessKey, 'the access key is what makes it useful later');
+  assert.equal(back.channels[0].key, invite.channels[0].key, 'channel grants are kept');
+  assert.equal(back.protocol, 'v2');
+  assert.equal(back.announced, false, 'not announced — that needs the v2 stream layer');
+});
+
+test('re-accepting replaces the entry rather than duplicating it', async () => {
+  const store = new CommunityStore(path.join(tmp, 'rejoin.json'));
+  const first = parseCommunityInvite({ kind: COMMUNITY_DIRECT_INVITE, content: v2Bundle() });
+  await store.put(communityFromInvite(first, { invitedBy: 'ab'.repeat(32) }));
+
+  // A later invite carrying a rotated key for the same community.
+  const rotated = parseCommunityInvite({
+    kind: COMMUNITY_DIRECT_INVITE,
+    content: v2Bundle({ community_root: '99887766'.repeat(8), root_epoch: 4 }),
+  });
+  await store.put(communityFromInvite(rotated, { invitedBy: 'ab'.repeat(32) }));
+
+  const all = await store.all();
+  assert.equal(all.length, 1, 'one entry per community');
+  assert.equal(all[0].accessKey, '99887766'.repeat(8), 'the rotated key wins');
+  assert.equal(all[0].epoch, 4);
+});
+
+test('an expired invite is refused', () => {
+  const invite = parseCommunityInvite({ kind: COMMUNITY_DIRECT_INVITE, content: v2Bundle() });
+  const now = Math.floor(Date.now() / 1000);
+  assert.throws(
+    () => communityFromInvite(invite, { invitedBy: 'x', expiresAt: now - 1, now }),
+    (e) => e instanceof InviteRejected && e.reason === 'expired',
+  );
+});
+
+test('leaving discards the keys', async () => {
+  const store = new CommunityStore(path.join(tmp, 'leave.json'));
+  const invite = parseCommunityInvite({ kind: COMMUNITY_DIRECT_INVITE, content: v2Bundle() });
+  await store.put(communityFromInvite(invite, { invitedBy: 'ab'.repeat(32) }));
+
+  assert.equal(await store.remove(invite.communityId), true);
+  assert.equal(await store.has(invite.communityId), false);
+  assert.equal(await store.remove(invite.communityId), false, 'removing twice is not an error');
+});
+
+test('a corrupt store reads as empty rather than throwing', async () => {
+  const file = path.join(tmp, 'corrupt.json');
+  await fs.writeFile(file, 'not json at all');
+  const store = new CommunityStore(file);
+  assert.deepEqual(await store.all(), [], 'a bot must still start');
+});
+
+// ── users and members ────────────────────────────────────────────────────────
+
+test('a profile parses, including both display-name spellings', () => {
+  const a = parseProfile({
+    kind: 0,
+    content: JSON.stringify({ name: 'neko', display_name: 'NekoSune', about: 'hi', bot: true }),
+  });
+  assert.equal(a.name, 'neko');
+  assert.equal(a.displayName, 'NekoSune');
+  assert.equal(a.bot, true);
+
+  // Clients have written both spellings for years.
+  const b = parseProfile({ kind: 0, content: JSON.stringify({ displayName: 'Camel' }) });
+  assert.equal(b.displayName, 'Camel');
+});
+
+test('a malformed or non-profile event yields empty fields, never a throw', () => {
+  assert.deepEqual(parseProfile({ kind: 0, content: 'not json' }), {});
+  assert.deepEqual(parseProfile({ kind: 1, content: '{"name":"x"}' }), {});
+  assert.deepEqual(parseProfile(null), {});
+});
+
+test('a user always has something to display', () => {
+  const account = generateAccount();
+  const anonymous = new User(account.publicKey, {}, { client: {} });
+  assert.ok(anonymous.displayName.length > 0, 'falls back to a short npub');
+  assert.equal(anonymous.known, false, 'no profile was ever found');
+  assert.equal(anonymous.npub, account.npub);
+
+  const named = new User(account.publicKey, { displayName: 'Bot' }, { client: {} }, Date.now());
+  assert.equal(named.displayName, 'Bot');
+  assert.equal(named.known, true);
+});
+
+test('members list the owner and inviter, deduped, and say they are incomplete', async () => {
+  const owner = generateAccount();
+  const inviter = generateAccount();
+  const observer = generateAccount();
+
+  const store = new CommunityStore(path.join(tmp, 'members.json'));
+  const invite = parseCommunityInvite({
+    kind: COMMUNITY_DIRECT_INVITE,
+    content: v2Bundle({ owner: owner.publicKey }),
+  });
+  await store.put(communityFromInvite(invite, { invitedBy: inviter.publicKey }));
+
+  const manager = new CommunityManager(store);
+  const community = (await manager.fetch()).first();
+
+  // The real roster is in the sealed Guestbook, which needs the v2 stream layer.
+  assert.equal(community.members.complete, false, 'must not read as the whole community');
+  assert.equal(community.members.ownerId, owner.publicKey);
+
+  let members = community.members.list();
+  assert.equal(members.length, 2, 'owner + inviter');
+  assert.equal(members.find((m) => m.isOwner).pubkey, owner.publicKey);
+  assert.equal(members.find((m) => m.source === 'inviter').pubkey, inviter.publicKey);
+
+  community.members.observe(observer.publicKey);
+  assert.equal(community.members.size, 3);
+
+  // Observing the owner or inviter again must not duplicate them.
+  community.members.observe(owner.publicKey);
+  community.members.observe(inviter.publicKey);
+  assert.equal(community.members.size, 3, 'no duplicates');
+});
+
+test('when the owner invited you, they are one member not two', async () => {
+  const owner = generateAccount();
+  const store = new CommunityStore(path.join(tmp, 'selfinvite.json'));
+  const invite = parseCommunityInvite({
+    kind: COMMUNITY_DIRECT_INVITE,
+    content: v2Bundle({ owner: owner.publicKey }),
+  });
+  await store.put(communityFromInvite(invite, { invitedBy: owner.publicKey }));
+
+  const community = (await new CommunityManager(store).fetch()).first();
+  const members = community.members.list();
+  assert.equal(members.length, 1, 'the same person twice is one member');
+  assert.equal(members[0].isOwner, true);
 });
 
 // ── runner ───────────────────────────────────────────────────────────────────

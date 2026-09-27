@@ -74,6 +74,27 @@ export const COMMUNITY_CONTROL = 3308;
 export const COMMUNITY_KICK = 3309;
 export const COMMUNITY_WEBXDC = 3310;
 export const COMMUNITY_TYPING = 3311;
+/** Guestbook snapshot, refounder-signed and chunked. */
+export const COMMUNITY_SNAPSHOT = 3312;
+/**
+ * Concord v2 **direct invite**.
+ *
+ * This is what a current Vector app sends when it invites someone to a
+ * community. It rides a standard NIP-59 gift wrap to a person — not the
+ * reversed stream wrap the rest of the v2 plane uses — and the wrap carries an
+ * outer `["k", "3313"]` index hint.
+ *
+ * Not to be confused with {@link COMMUNITY_INVITE_BUNDLE} (3304), which is the
+ * older v1 bundle. A bot that only watches 3304 sees no invites at all from a
+ * modern client.
+ */
+export const COMMUNITY_DIRECT_INVITE = 3313;
+/** Threaded reply in a v2 channel (NIP-22 comment). */
+export const COMMUNITY_COMMENT = 1111;
+/** Typing indicator, ephemeral tier. */
+export const COMMUNITY_TYPING_EPHEMERAL = 23311;
+/** Public invite bundle — a bare addressable event, outside the wrap. */
+export const COMMUNITY_INVITE_BUNDLE_PUBLIC = 33301;
 
 /** Every Concord v2 kind, in numeric order. */
 export const COMMUNITY_KINDS: readonly number[] = [
@@ -88,6 +109,8 @@ export const COMMUNITY_KINDS: readonly number[] = [
   COMMUNITY_KICK,
   COMMUNITY_WEBXDC,
   COMMUNITY_TYPING,
+  COMMUNITY_SNAPSHOT,
+  COMMUNITY_DIRECT_INVITE,
 ];
 
 /** True when `kind` belongs to the Concord v2 append plane. */

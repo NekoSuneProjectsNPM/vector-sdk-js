@@ -11,6 +11,109 @@ changed in each version.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-27
+
+Closes a sender-spoofing hole present in every earlier release, makes invites
+from current Vector clients visible at all, and adds communities, members and
+user profiles.
+
+### Security
+
+- **Incoming messages were not authenticated, so any sender could impersonate
+  any account.** A NIP-59 rumor is unsigned — the signature lives on the kind-13
+  seal — but `nostr-tools`' `unwrapEvent` verifies neither the seal's signature
+  nor that the rumor's `pubkey` agrees with who signed it. The client trusted
+  `rumor.pubkey` for every message, command and reply, so anyone could seal a
+  rumor attributed to someone else and have a bot act on it as that person,
+  including whoever the bot trusts for privileged commands.
+
+  `unwrapGiftWrap()` replaces it: Schnorr-verify the seal, require the rumor to
+  name the same author, and re-derive the rumor id so a sender cannot point
+  replies, reactions or deletions at an event they did not write. It throws
+  rather than returning null — a wrap failing these checks is a forgery attempt,
+  never an ordinary message. This is the check `vector-core` calls mandatory:
+  the seal's npub "is the only proof of who invited".
+
+  Affects every release before 1.2.0. Bots authorizing on sender should treat
+  prior traffic as unauthenticated.
+
+### Fixed
+
+- **Connecting with a key overwrote that account's profile.** `VectorBot.new()`
+  published a kind-0 on every connect, and kind 0 is *replaceable* — a publish
+  replaces the whole profile. Anyone who ran the SDK or CLI with a personal key
+  had their name, picture and bio erased and replaced with the bot defaults, and
+  was stamped `bot: true`. Publishing now merges over what the account already
+  has, `publishProfile: false` skips it, and `bot: false` keeps a human account
+  unflagged.
+
+- **A wrongly-set bot badge could not be cleared.** Vector only re-evaluates the
+  badge when a profile *contains* a `bot` field; one that omits it leaves the
+  existing flag untouched. So removing the field does nothing — only publishing
+  `bot: false` clears it. `client.setBotFlag(false)` does that while carrying
+  every other field over, and `scripts/fix-bot-flag.mjs` is a standalone version
+  for an account that never goes near the SDK. `metadataToContent()` keeps a
+  `false` value rather than dropping it as empty, since dropping it would make
+  the badge unclearable.
+
+- **Community invites from current Vector clients were invisible.** Invites were
+  read as kind 3304, the *v1* bundle; a modern client sends a Concord v2 Direct
+  Invite, **kind 3313**, in a different wire-frozen shape (`community_root` /
+  `root_epoch`, not `server_root_key` / `server_root_epoch`). Both generations
+  are now read, with the protocol reported as `invite.protocol`, and forwarding
+  preserves the issuing kind. Verified against five live invites on
+  `wss://jskitty.cat/nostr`.
+- A v2 bundle states its own expiry in milliseconds, which is used when the
+  gift wrap carries no NIP-40 tag — previously such an invite looked permanent.
+
+- A v2 bundle states its own expiry in milliseconds, which is used when the
+  gift wrap carries no NIP-40 tag — previously such an invite looked permanent.
+
+### Added
+
+- **Accepting invites.** `client.acceptInvite(id)` keeps what the bundle vended
+  — the base access key, its epoch and any channel keys — in a communities file
+  written owner-only, since those are credentials. Re-accepting replaces the
+  entry, which is how a bot picks up rotated keys. An expired invite is refused:
+  past its deadline the preview still renders but the keys are stale.
+
+- **Communities, discord.js-shaped.** `client.communities` is a manager with
+  `.fetch()`, `.cache`, `.get(id)`, `.resolve(id)` and `.leave(id)`; each
+  `Community` has `.id`, `.name`, `.channels`, `.relays`, `.joinedAt` and
+  `.leave()`. The cache fills on `fetch()`, as in discord.js. `vector-bot
+  community list` and `community leave <id>` do the same from the terminal.
+
+- **Invites no longer pile up.** Repeat invites to the same community collapse
+  to one entry, and the longest-lived wins rather than merely the last seen — an
+  older wrap can be the one with life left in it. `clearInvites()` drops held
+  invites, `pruneInvites()` drops only expired ones, and accepting removes the
+  invite it consumed. Five real invites on the wire now present as one.
+
+- **Users and profiles**, discord.js-style. `client.users.fetch(npub)` returns a
+  `User` with `displayName`, `username`, `about`, `avatarURL`, `bannerURL`,
+  `nip05`, `lud16` and `bot`, plus `send()`, `dmRelays()` and `verifyNip05()`,
+  which checks the claim against the domain it names rather than trusting it.
+  `fetchMany()` resolves a set in one relay query. `displayName` always returns
+  something, falling back to a short npub, so a caller never needs its own
+  fallback. Misses are cached too — an account with no profile is ordinary, and
+  re-querying on every mention costs more than the empty result is worth.
+
+- **Community members**, as far as they are knowable. `community.members` lists
+  the **owner** (self-certified: the community id is a hash commitment to it),
+  the **inviter** (from the verified seal), and anyone `observe()`d. Each entry
+  carries its `source`, because the evidence differs in strength.
+  `members.complete` is `false` and will stay so until the v2 stream layer
+  lands: the real roster is the community's Guestbook, sealed under a key
+  derived from the community secret. It is reported rather than hidden so a
+  short list is not mistaken for a small community.
+- Concord v2 kind constants: `COMMUNITY_DIRECT_INVITE` (3313),
+  `COMMUNITY_SNAPSHOT` (3312), `COMMUNITY_COMMENT`, the ephemeral typing kind and
+  the public invite bundle kind.
+
+- Concord v2 kind constants: `COMMUNITY_DIRECT_INVITE` (3313),
+  `COMMUNITY_SNAPSHOT` (3312), `COMMUNITY_COMMENT`, the ephemeral typing kind and
+  the public invite bundle kind.
+
 ## [1.2.0] - 2026-09-27
 
 Bot accounts: creating one, storing it safely, and the things a bot needs an
@@ -24,25 +127,30 @@ identity for.
   `accountFromKey`, `accountFromMnemonic`, `saveAccount` and `loadAccount` round
   a bot's identity through disk. Loading re-derives every field from the private
   key, so a hand-edited file cannot claim an npub it does not own.
+
 - **The `vector-bot` CLI**, for anyone who would rather not write code to get a
   bot: `create`, `show`, `publish-profile`, `send` and `friend add/remove/list`.
   `vector-bot create --mnemonic --publish` is a working, discoverable bot in one
   command.
+
 - **The account file is protected on creation.** `ensureAccountIgnored()` adds it
   to the project's `.gitignore`, creating one if needed, and to `.npmignore` when
   the project already has one — npm only falls back to `.gitignore` when no
   `.npmignore` exists, so a project with one would otherwise publish the key.
   Idempotent, and it never invents an `.npmignore`, which would silently change
   what the project ships.
+
 - **`resolveAccount()`** reads the account file when it exists and falls back to
   the environment (`VECTOR_NSEC`, `VECTOR_PRIVATE_KEY`, `NOSTR_PRIVATE_KEY`,
   `NSEC`, or a seed phrase in `VECTOR_MNEMONIC` / `NOSTR_MNEMONIC`) when it does
   not, so the same code runs from a working copy and from a container with no
   writable disk. With `create: true` it mints and saves one instead of failing,
   which is the keyless mode: nothing to configure on the first run.
+
 - **Friends.** `client.addFriend()`, `removeFriend()` and `getFriends()` manage
   the bot's NIP-02 contact list. Each change re-fetches the published list before
   republishing it, so a restart or a second client cannot drop everyone else.
+
 - **Invites.** Community invite bundles (kind 3304) are parsed as they arrive and
   surfaced on the `invite` event, with expired ones flagged rather than dropped.
   `client.forwardInvite()` passes one the bot holds on to someone else, preserving
@@ -50,6 +158,7 @@ identity for.
   live community key material that only a member holding that community's state
   can produce. Bundles are treated as untrusted input and bounded on read, matching
   `vector_core::community::invite`.
+
 - **`channel.sendRumor()`** gift-wraps and sends a rumor you built yourself, for
   event kinds with no dedicated method.
 
@@ -227,7 +336,8 @@ Never tagged or published; superseded by 1.1.0.
   metadata builders, AES-256-GCM file encryption, NIP-96 upload, and the
   `VectorBotClient` / `VectorBot` / `Channel` surface, with a demo script.
 
-[unreleased]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.2.0...HEAD
+[unreleased]: https://github.com/NekoSuneProjectsNPM/vector-sdk-js/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/NekoSuneProjectsNPM/vector-sdk-js/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.0.4...v1.1.0

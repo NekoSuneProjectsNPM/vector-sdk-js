@@ -225,6 +225,7 @@ export class VectorBot {
     nip05: string,
     lud16: string,
     clientConfig?: ClientConfig,
+    options: { bot?: boolean; publishProfile?: boolean } = {},
   ): Promise<VectorBot> {
     const resolvedPicture = sanitizeUrl(picture, 'https://example.com/avatar.png');
     const resolvedBanner = sanitizeUrl(banner, 'https://example.com/banner.png');
@@ -238,12 +239,20 @@ export class VectorBot {
       resolvedBanner,
       nip05,
       lud16,
+      options.bot !== false,
     );
 
-    try {
-      await client.setMetadata(metadata);
-    } catch (error) {
-      console.error('Failed to set metadata', error);
+    // Publishing merges over whatever the account already has, rather than
+    // replacing it. Kind 0 is replaceable, so a plain publish would erase the
+    // name, picture and bio of anyone who ran this with a personal key — and
+    // stamp them as a bot, which Vector will not un-badge until something
+    // publishes `bot: false`.
+    if (options.publishProfile !== false) {
+      try {
+        await client.setMetadata(metadata);
+      } catch (error) {
+        console.error('Failed to set metadata', error);
+      }
     }
 
     // Advertise where this bot wants its gift wraps delivered, so other clients

@@ -5,6 +5,10 @@ import { CommandBuilder } from './commands.js';
 import { Contacts } from './contacts.js';
 import type { Contact } from './contacts.js';
 import type { CommunityInvite, ReceivedInvite } from './invites.js';
+import { CommunityManager, CommunityStore } from './communities.js';
+import type { Community, JoinedCommunity } from './communities.js';
+import { UserManager } from './users.js';
+import type { User } from './users.js';
 export type BotProfile = {
     name: string;
     displayName: string;
@@ -47,10 +51,28 @@ export type BotClientOptions = {
     /** Extra relays for manifest and inbox-list discovery. */
     discoveryRelays?: string[];
     /**
+     * Where accepted communities and their keys are stored. Holds live key
+     * material, so it is written owner-only and belongs out of version control.
+     */
+    communitiesFile?: string;
+    /**
      * Publish the slash-command manifest on connect. On by default whenever at
      * least one command is registered.
      */
     publishManifest?: boolean;
+    /**
+     * Whether to advertise the account as a bot. On by default.
+     *
+     * Set false when running under a human's key: Vector only re-evaluates its
+     * badge when a profile carries the field, so a wrongly-set flag persists
+     * until something publishes `bot: false`.
+     */
+    bot?: boolean;
+    /**
+     * Publish the kind-0 profile on connect. On by default, and it merges over
+     * the existing profile rather than replacing it.
+     */
+    publishProfile?: boolean;
 };
 export type MlsDecryptedMessage = {
     groupId: string;
@@ -147,8 +169,14 @@ export declare class VectorBotClient extends EventEmitter {
     private readonly seenMessageIds;
     private readonly commandRegistry;
     private contactsCache?;
-    /** Invites the bot has received, newest last, keyed by community id. */
+    /**
+     * Invites the bot has received, keyed by community id so repeat invites to
+     * the same community collapse to one entry instead of stacking up.
+     */
     private readonly receivedInvites;
+    private communityStoreCache?;
+    private communityManagerCache?;
+    private userManagerCache?;
     private connectionMonitor?;
     private connectionMonitorStartedAt;
     constructor(options: BotClientOptions);
@@ -226,6 +254,50 @@ export declare class VectorBotClient extends EventEmitter {
      * given. See {@link forwardInvite}.
      */
     getInvites(): ReceivedInvite[];
+    /** Where accepted communities and their keys are stored. */
+    get communityStore(): CommunityStore;
+    /**
+     * The bot's communities, discord.js-style: `client.communities.cache`,
+     * `.fetch()`, `.get(id)`, `.leave(id)`.
+     *
+     * The cache starts empty and fills on `fetch()`, mirroring discord.js, where
+     * the cache is what the client has actually seen.
+     */
+    get communities(): CommunityManager;
+    /**
+     * Profile lookups — discord.js-style `client.users`: `.fetch(npub)`,
+     * `.get(npub)`, `.cache`, `.fetchMany([...])`.
+     */
+    get users(): UserManager;
+    /** A single user's profile. Shorthand for `client.users.fetch(...)`. */
+    fetchUser(user: string): Promise<User>;
+    /**
+     * Accept an invite: keep the keys it vended and record the community.
+     *
+     * `invite` is a community id the bot holds an invite for, or a bundle you
+     * already have. Re-accepting replaces the stored entry, which is how a bot
+     * picks up rotated keys or newly granted channels.
+     *
+     * **This records membership; it does not yet make the bot a participant.**
+     * Announcing the join and reading or posting in a channel ride the Concord v2
+     * stream layer, which this package does not implement. So the bot holds valid
+     * credentials and is ready, but the community cannot see it and it cannot
+     * read the room. `announced` stays false to mark exactly that.
+     */
+    acceptInvite(invite: string | CommunityInvite): Promise<JoinedCommunity>;
+    /** Every community the bot has accepted. */
+    getCommunities(): Promise<Community[]>;
+    /** Forget an accepted community and discard its keys. */
+    leaveCommunity(communityId: string): Promise<boolean>;
+    /**
+     * Drop held invites.
+     *
+     * With no argument it clears every invite; with a community id, just that
+     * one. Expired invites are cleared by {@link pruneInvites} instead.
+     */
+    clearInvites(communityId?: string): number;
+    /** Drop invites whose deadline has passed. Returns how many went. */
+    pruneInvites(): number;
     /** A received invite by community id, expired ones included. */
     getInvite(communityId: string): ReceivedInvite | undefined;
     /**

@@ -35,5 +35,23 @@ export declare function wrapEventWithRumor(event: Partial<UnsignedEvent>, sender
  * sent. The rumor — and therefore the message id — is identical in both wraps.
  */
 export declare function rewrapRumor(rumor: Rumor, senderPrivateKey: Uint8Array, recipientPublicKey: string, extraTags?: string[][]): Event;
+export declare class GiftWrapError extends Error {
+}
+/**
+ * Unwrap a gift wrap **and authenticate who sent it**.
+ *
+ * A NIP-59 rumor is unsigned — the signature lives on the kind-13 seal — so the
+ * rumor's `pubkey` field is a claim, not proof. Verifying the seal and checking
+ * that the rumor agrees with it is the only thing that establishes the sender.
+ *
+ * `nostr-tools`' own `unwrapEvent` skips both checks, which lets anyone seal a
+ * rumor attributed to someone else and have it come back under that name. A bot
+ * that authorizes on sender would hand an attacker whatever the impersonated
+ * account can do, so unwrapping without this is not safe.
+ *
+ * Throws rather than returning null: a wrap that fails these checks is a forgery
+ * attempt or corruption, never something to quietly treat as an ordinary message.
+ */
+export declare function unwrapGiftWrap(wrap: Event, recipientPrivateKey: Uint8Array): Rumor;
 /** Pull the NIP-40 `expiration` tag off a rumor, if it carries one. */
 export declare function expirationTagsOf(tags: string[][]): string[][];

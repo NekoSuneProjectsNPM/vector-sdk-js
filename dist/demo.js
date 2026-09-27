@@ -1,16 +1,18 @@
 import { EventEmitter } from 'events';
 import { nip19 } from 'nostr-tools';
 import * as nip04 from 'nostr-tools/nip04';
-import * as nip59 from 'nostr-tools/nip59';
 import { ChatMessage, EncryptedDirectMessage, PrivateDirectMessage } from 'nostr-tools/kinds';
 import { finalizeEvent } from 'nostr-tools/pure';
 import { VectorBot } from './bot.js';
 import { loadFile, parseAttachment } from './bot.js';
 import { addressedBots, CommandArgError, manifestToEvent, parseCommandText, typedArgs, usageLine, } from './bot-interface.js';
 import { argAccessors, CommandBuilder, CommandRegistry } from './commands.js';
-import { APPLICATION_SPECIFIC, COMMUNITY_INVITE_BUNDLE, DELETION, FILE_ATTACHMENT, MESSAGE_EDIT, REACTION, } from './kinds.js';
+import { APPLICATION_SPECIFIC, COMMUNITY_DIRECT_INVITE, COMMUNITY_INVITE_BUNDLE, DELETION, FILE_ATTACHMENT, MESSAGE_EDIT, REACTION, } from './kinds.js';
 import { Contacts } from './contacts.js';
 import { buildInviteRumor, readInviteRumor } from './invites.js';
+import { unwrapGiftWrap } from './giftwrap.js';
+import { CommunityManager, CommunityStore, communityFromInvite } from './communities.js';
+import { UserManager } from './users.js';
 export class VectorBotClient extends EventEmitter {
     constructor(options) {
         super();
@@ -26,7 +28,10 @@ export class VectorBotClient extends EventEmitter {
         this.observedGroupIds = new Set();
         this.seenMessageIds = new Set();
         this.commandRegistry = new CommandRegistry();
-        /** Invites the bot has received, newest last, keyed by community id. */
+        /**
+         * Invites the bot has received, keyed by community id so repeat invites to
+         * the same community collapse to one entry instead of stacking up.
+         */
         this.receivedInvites = new Map();
         this.connectionMonitorStartedAt = 0;
         this.options = options;
@@ -88,7 +93,7 @@ export class VectorBotClient extends EventEmitter {
             selfWrap: this.options.selfWrap,
             useInboxRelays: this.options.useInboxRelays,
             discoveryRelays: this.options.discoveryRelays,
-        });
+        }, { bot: this.options.bot, publishProfile: this.options.publishProfile });
         this.bot = bot;
         this.log('Connected. Bot public key:', bot.publicKey);
         await this.publishInterfaceManifest(bot);
@@ -240,6 +245,125 @@ export class VectorBotClient extends EventEmitter {
     getInvites() {
         const now = Math.floor(Date.now() / 1000);
         return Array.from(this.receivedInvites.values()).filter((received) => !received.expiresAt || received.expiresAt > now);
+    }
+    /** Where accepted communities and their keys are stored. */
+    get communityStore() {
+        if (!this.communityStoreCache) {
+            this.communityStoreCache = new CommunityStore(this.options.communitiesFile);
+        }
+        return this.communityStoreCache;
+    }
+    /**
+     * The bot's communities, discord.js-style: `client.communities.cache`,
+     * `.fetch()`, `.get(id)`, `.leave(id)`.
+     *
+     * The cache starts empty and fills on `fetch()`, mirroring discord.js, where
+     * the cache is what the client has actually seen.
+     */
+    get communities() {
+        if (!this.communityManagerCache) {
+            this.communityManagerCache = new CommunityManager(this.communityStore, (id) => {
+                this.log('Left community', id);
+                this.emit('community_left', { communityId: id });
+            }, 
+            // Lets a community's members carry profiles without communities.ts
+            // needing to know anything about relays.
+            (pubkey) => this.users.fetch(pubkey));
+        }
+        return this.communityManagerCache;
+    }
+    /**
+     * Profile lookups — discord.js-style `client.users`: `.fetch(npub)`,
+     * `.get(npub)`, `.cache`, `.fetchMany([...])`.
+     */
+    get users() {
+        if (!this.userManagerCache) {
+            this.userManagerCache = new UserManager(this.requireBot().client, (pubkey, content) => this.send(pubkey, content));
+        }
+        return this.userManagerCache;
+    }
+    /** A single user's profile. Shorthand for `client.users.fetch(...)`. */
+    async fetchUser(user) {
+        return this.users.fetch(user);
+    }
+    /**
+     * Accept an invite: keep the keys it vended and record the community.
+     *
+     * `invite` is a community id the bot holds an invite for, or a bundle you
+     * already have. Re-accepting replaces the stored entry, which is how a bot
+     * picks up rotated keys or newly granted channels.
+     *
+     * **This records membership; it does not yet make the bot a participant.**
+     * Announcing the join and reading or posting in a channel ride the Concord v2
+     * stream layer, which this package does not implement. So the bot holds valid
+     * credentials and is ready, but the community cannot see it and it cannot
+     * read the room. `announced` stays false to mark exactly that.
+     */
+    async acceptInvite(invite) {
+        let bundle;
+        let invitedBy;
+        let expiresAt;
+        if (typeof invite === 'string') {
+            const held = this.receivedInvites.get(invite);
+            if (!held) {
+                throw new Error(`No invite held for community ${invite}. Known: ${this.getInvites().map((i) => i.invite.communityId).join(', ') || 'none'}`);
+            }
+            bundle = held.invite;
+            invitedBy = held.senderPubkey;
+            expiresAt = held.expiresAt;
+        }
+        else {
+            bundle = invite;
+            invitedBy = '';
+        }
+        const community = communityFromInvite(bundle, { invitedBy, expiresAt });
+        await this.communityStore.put(community);
+        // The invite has done its job; holding it would only re-offer a community
+        // already joined.
+        this.receivedInvites.delete(community.communityId);
+        // Keep the manager's cache honest about what was just joined.
+        await this.communities.fetch();
+        this.log('Accepted invite to', community.name, `[${community.communityId}]`);
+        this.emit('community_joined', community);
+        return community;
+    }
+    /** Every community the bot has accepted. */
+    async getCommunities() {
+        return (await this.communities.fetch()).toArray();
+    }
+    /** Forget an accepted community and discard its keys. */
+    async leaveCommunity(communityId) {
+        return this.communities.leave(communityId);
+    }
+    /**
+     * Drop held invites.
+     *
+     * With no argument it clears every invite; with a community id, just that
+     * one. Expired invites are cleared by {@link pruneInvites} instead.
+     */
+    clearInvites(communityId) {
+        if (communityId) {
+            return this.receivedInvites.delete(communityId) ? 1 : 0;
+        }
+        const count = this.receivedInvites.size;
+        this.receivedInvites.clear();
+        this.log('Cleared', count, 'invite(s)');
+        return count;
+    }
+    /** Drop invites whose deadline has passed. Returns how many went. */
+    pruneInvites() {
+        const now = Math.floor(Date.now() / 1000);
+        let dropped = 0;
+        for (const [id, received] of this.receivedInvites) {
+            if (received.expiresAt !== undefined && received.expiresAt <= now) {
+                this.receivedInvites.delete(id);
+                dropped += 1;
+            }
+        }
+        if (dropped) {
+            this.log('Pruned', dropped, 'expired invite(s)');
+        }
+        return dropped;
     }
     /** A received invite by community id, expired ones included. */
     getInvite(communityId) {
@@ -591,7 +715,9 @@ export class VectorBotClient extends EventEmitter {
     }
     handleGiftWrap(bot, event, emitDirectMessages = true) {
         try {
-            const rumor = nip59.unwrapEvent(event, bot.privateKeyBytes);
+            // Authenticates the seal: `nip59.unwrapEvent` would let a sender claim
+            // any pubkey, and everything below trusts `rumor.pubkey`.
+            const rumor = unwrapGiftWrap(event, bot.privateKeyBytes);
             this.log('Gift-wrap rumor:', rumor);
             if (emitDirectMessages && rumor.kind === PrivateDirectMessage && rumor.content) {
                 this.emitMessage(bot, rumor.pubkey, rumor.kind, event, rumor.content, true, { rumor });
@@ -619,9 +745,20 @@ export class VectorBotClient extends EventEmitter {
             // A community invite. Held rather than acted on: joining a Concord v2
             // community needs the envelope and epoch-key machinery that lives in
             // vector-core, so what a bot can do here is surface it and pass it on.
-            if (emitDirectMessages && rumor.kind === COMMUNITY_INVITE_BUNDLE) {
+            if (emitDirectMessages &&
+                (rumor.kind === COMMUNITY_INVITE_BUNDLE || rumor.kind === COMMUNITY_DIRECT_INVITE)) {
                 const received = readInviteRumor(rumor);
                 if (received) {
+                    // Relays replay history, and an inviter may click Invite repeatedly,
+                    // so the same community arrives many times. Keep one entry, and let
+                    // the longest-lived invite win — an older wrap may still be the one
+                    // with life left in it.
+                    const held = this.receivedInvites.get(received.invite.communityId);
+                    const supersedes = !held ||
+                        (received.expiresAt ?? Infinity) >= (held.expiresAt ?? Infinity);
+                    if (!supersedes) {
+                        return;
+                    }
                     this.receivedInvites.set(received.invite.communityId, received);
                     this.log('Invite received for', received.invite.communityId, received.expired ? '(already expired)' : '');
                     this.emit('invite', received);

@@ -227,6 +227,59 @@ client.on('invite', ({ invite, senderPubkey, expired }) => {
 await client.forwardInvite('npub1…', invite.communityId);
 ```
 
+### Accepting, listing and leaving
+
+```ts
+// Accept: keeps the access key, epoch and channel keys the bundle vended.
+await client.acceptInvite(invite.communityId);
+
+// discord.js-shaped, so this should look familiar:
+const communities = await client.communities.fetch();
+console.log(`In ${communities.size} communities`);
+for (const community of communities.toArray()) {
+  console.log(`${community.name} — ${community.channels.length} channels`);
+}
+
+const one = client.communities.get(id);
+await one.leave();              // or: client.communities.leave(id)
+```
+
+From the terminal: `vector-bot community list` and `vector-bot community leave <id>`.
+
+### Members and user info
+
+```ts
+const user = await client.users.fetch('npub1…');
+user.displayName;            // always something, falls back to a short npub
+user.username;               // the handle, if they set one
+user.about; user.avatarURL; user.nip05; user.bot;
+await user.verifyNip05();    // checks the claim against the domain
+await user.send('hello');
+
+const community = client.communities.get(id);
+for (const member of await community.members.fetch()) {
+  console.log(member.user.displayName, member.isOwner ? '(owner)' : member.source);
+}
+```
+
+> **`community.members` is partial, and says so.** `members.complete` is
+> `false`. The real roster lives in the community's Guestbook, sealed under a
+> key derived from the community secret, so reading it needs the Concord v2
+> stream layer. What is knowable today: the **owner** — self-certified, since
+> the community id is a hash commitment to it — the **inviter**, from the
+> verified seal, and anyone you `observe()`. Check `complete` before showing a
+> member count.
+
+Repeat invites to the same community collapse to a single entry — the
+longest-lived one wins, since an older wrap can be the one with life left in it.
+`clearInvites()` drops held invites and `pruneInvites()` drops only expired ones.
+
+> **Accepting records membership; it does not yet make the bot a participant.**
+> Announcing the join and reading or posting in a channel ride the Concord v2
+> stream layer, which this package does not implement. A bot holds valid
+> credentials and is ready, but the community cannot see it and it cannot read
+> the room. `community.announced` stays `false` to mark exactly that.
+
 A bot can read and forward invites, but **cannot create them**. A bundle carries
 live key material for the community, which only a member holding that
 community's state can produce — and that state lives in `vector-core`. The
@@ -308,6 +361,29 @@ import { kinds } from '@nekosuneprojects/vector-sdk';
 
 kinds.isCommunityKind(event.kind); // true for 3300-3311
 ```
+
+## Fixing a wrongly-set bot badge
+
+Vector only re-evaluates its bot badge when a profile **contains** a `bot`
+field. A profile that simply omits it leaves the existing flag alone — so an
+account wrongly marked as a bot cannot be fixed by removing the field. The only
+thing that clears it is publishing `"bot": false`.
+
+```bash
+# Dry run first — shows exactly what would change, publishes nothing.
+node scripts/fix-bot-flag.mjs --nsec nsec1...
+
+# Then publish.
+node scripts/fix-bot-flag.mjs --nsec nsec1... --yes
+```
+
+It reads your current profile, writes it back with only `bot` changed, and
+leaves every other field exactly as it was. Pass the key via `$VECTOR_NSEC`
+instead of `--nsec` to keep it out of your shell history. In code:
+`await client.setBotFlag(false)`.
+
+To avoid the problem: pass `bot: false` when running under a human's key, or
+`publishProfile: false` to leave the profile alone entirely.
 
 ## Building and testing
 
