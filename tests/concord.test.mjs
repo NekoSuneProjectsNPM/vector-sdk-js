@@ -10,6 +10,8 @@ import * as chat from '../dist/concord/chat.js';
 import * as gb from '../dist/concord/guestbook.js';
 import { CommunityRuntime, resolveChannels } from '../dist/concord/runtime.js';
 import { communityFromInvite } from '../dist/communities.js';
+import * as att from '../dist/concord/attachments.js';
+import { encryptData, generateEncryptionParams, calculateFileHash } from '../dist/crypto.js';
 
 let passed = 0;
 const tests = [];
@@ -375,6 +377,109 @@ test('leaving publishes a guestbook leave', async () => {
   await runtime.announceLeave(record({ announced: true }));
   const book = d.guestbookGroupKey(SECRET, Buffer.from(communityId, 'hex'), 0);
   assert.equal(gb.openGuestbookEvent(h.published[0].event, book).type, 'leave');
+});
+
+// ── attachments (NIP-92 imeta) ───────────────────────────────────────────────
+
+/** An imeta tag in the exact field order vector-core's attachment_to_imeta writes. */
+function vectorImeta({ url, key, nonce, size, ox, name, mime = 'image/png', dim = '640x480', fallback = [] }) {
+  const tag = ['imeta', `url ${url}`, `m ${mime}`, 'encryption-algorithm aes-gcm', `decryption-key ${key}`, `decryption-nonce ${nonce}`];
+  if (size) tag.push(`size ${size}`);
+  if (ox) tag.push(`ox ${ox}`);
+  if (name) tag.push(`name ${name}`);
+  tag.push('thumb abc', `dim ${dim}`);
+  for (const f of fallback) tag.push(`fallback ${f}`);
+  return tag;
+}
+
+test('an imeta in vector-core format parses with its crypto and metadata', () => {
+  const params = generateEncryptionParams();
+  const parsed = att.attachmentFromImeta(vectorImeta({ url: 'https://blossom.example/abc', ...params, size: 1234, ox: 'ab'.repeat(32), name: 'my screenshot.png' }));
+  assert.equal(parsed.url, 'https://blossom.example/abc');
+  assert.equal(parsed.mimeType, 'image/png');
+  assert.deepEqual(parsed.encryption, params);
+  assert.equal(parsed.size, 1234);
+  assert.equal(parsed.hash, 'ab'.repeat(32));
+  assert.equal(parsed.name, 'my screenshot.png');
+  assert.equal(parsed.width, 640);
+  assert.equal(parsed.height, 480);
+});
+
+test('malformed imeta tags are skipped', () => {
+  assert.equal(att.attachmentFromImeta(['imeta', 'm image/png']), undefined, 'no url');
+  assert.equal(att.attachmentFromImeta(['imeta', 'url https://x/y', 'decryption-key 00']), undefined, 'half the key pair');
+  assert.equal(att.attachmentFromImeta(['imeta', 'url https://x/y', 'decryption-key 00', 'decryption-nonce zz']), undefined, 'non-hex nonce');
+  assert.equal(att.attachmentFromImeta(['emoji', 'url https://x/y']), undefined, 'not an imeta');
+  const plain = att.attachmentFromImeta(['imeta', 'url https://x/y.gif', 'm image/gif']);
+  assert.equal(plain.encryption, undefined, 'foreign NIP-92 media is plain');
+});
+
+test('filenames are sanitized and fallbacks filtered', () => {
+  const parsed = att.attachmentFromImeta(['imeta', 'url https://a/b', 'name ../../etc/passwd', 'fallback http://insecure/x', 'fallback https://a/b', 'fallback https://m1/x', 'fallback https://m1/x']);
+  assert.ok(!parsed.name.includes('/'));
+  assert.deepEqual(parsed.fallbackUrls, ['https://m1/x']);
+});
+
+test('attachments are read off a message, and inlined blob urls stripped from the caption', () => {
+  const alice = keypair();
+  const tag = vectorImeta({ url: 'https://blossom.example/f', ...generateEncryptionParams() });
+  const rumor = chat.buildMessageRumor(alice.pk, CHANNEL, 0, 'look\nhttps://blossom.example/f', { extraTags: [tag] });
+  const found = att.attachmentsFromRumor(rumor);
+  assert.equal(found.length, 1);
+  assert.equal(att.stripAttachmentUrls(rumor.content, found), 'look');
+});
+
+function fakeFetch(routes) {
+  return async (url) => {
+    const body = routes[url];
+    if (!body) return { ok: false, status: 404 };
+    return { ok: true, status: 200, arrayBuffer: async () => body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) };
+  };
+}
+
+test('a download is decrypted and checked against its hash', async () => {
+  const png = Buffer.from('\x89PNG fake image bytes');
+  const params = generateEncryptionParams();
+  const cipher = encryptData(png, params);
+  const a = att.attachmentFromImeta(vectorImeta({ url: 'https://b/x', ...params, ox: calculateFileHash(png) }));
+  const bytes = await att.downloadCommunityAttachment(a, { fetchImpl: fakeFetch({ 'https://b/x': cipher }) });
+  assert.deepEqual(bytes, png);
+});
+
+test('a download that does not match its hash is refused', async () => {
+  const params = generateEncryptionParams();
+  const a = att.attachmentFromImeta(vectorImeta({ url: 'https://b/x', ...params, ox: '00'.repeat(32) }));
+  await assert.rejects(att.downloadCommunityAttachment(a, { fetchImpl: fakeFetch({ 'https://b/x': encryptData(Buffer.from('x'), params) }) }), /hash/);
+});
+
+test('a download falls back to a mirror, and respects the size cap', async () => {
+  const gif = Buffer.from('GIF89a fake');
+  const params = generateEncryptionParams();
+  const a = att.attachmentFromImeta(vectorImeta({ url: 'https://dead/x', ...params, fallback: ['https://mirror/x'] }));
+  const bytes = await att.downloadCommunityAttachment(a, { fetchImpl: fakeFetch({ 'https://mirror/x': encryptData(gif, params) }) });
+  assert.deepEqual(bytes, gif);
+  const big = att.attachmentFromImeta(vectorImeta({ url: 'https://b/x', ...params, size: 999 }));
+  await assert.rejects(att.downloadCommunityAttachment(big, { maxBytes: 10, fetchImpl: fakeFetch({}) }), /limit/);
+});
+
+test('attachment filenames fall back to the mime type', () => {
+  assert.equal(att.attachmentFilename({ mimeType: 'image/jpeg' }), 'attachment-1.jpg');
+  assert.equal(att.attachmentFilename({ mimeType: 'image/gif' }, 2), 'attachment-3.gif');
+  assert.equal(att.attachmentFilename({ mimeType: 'image/png', name: 'shot.png' }), 'shot.png');
+});
+
+test('a community_message carries its attachments', async () => {
+  const bot = keypair();
+  const alice = keypair();
+  const h = fakeHost(bot);
+  await new CommunityRuntime(h.host).start([record({ announced: true })]);
+  const tag = vectorImeta({ url: 'https://blossom.example/f', ...generateEncryptionParams() });
+  const rumor = chat.buildMessageRumor(alice.pk, CHANNEL, 0, '', { extraTags: [tag] });
+  h.deliver(chat.sealChatRumor(rumor, group, alice.sk));
+  const [, message] = h.events.find(([name]) => name === 'community_message');
+  assert.equal(message.attachments.length, 1);
+  assert.equal(message.attachments[0].mimeType, 'image/png');
+  assert.equal(typeof message.download, 'function');
 });
 
 console.log('\nconcord v2');

@@ -1,3 +1,4 @@
+import { attachmentsFromRumor, downloadCommunityAttachment, stripAttachmentUrls } from './attachments.js';
 import { buildDeleteRumor, buildEditRumor, buildMessageRumor, buildReactionRumor, buildTypingRumor, ChatKind, openChatEvent, sealChatRumor, } from './chat.js';
 import { bytes32, channelGroupKey, guestbookGroupKey, verifyCommunityId } from './derive.js';
 import { buildJoinRumor, buildLeaveRumor, openGuestbookEvent, sealGuestbookRumor } from './guestbook.js';
@@ -175,10 +176,13 @@ export class CommunityRuntime {
         };
         switch (event.type) {
             case 'message': {
+                const attachments = attachmentsFromRumor(opened.rumor);
                 const message = {
                     ...base,
                     id: opened.rumor.id,
-                    content: opened.rumor.content,
+                    content: stripAttachmentUrls(opened.rumor.content, attachments),
+                    attachments,
+                    download: (attachment, options) => downloadCommunityAttachment(attachment, options),
                     kind: opened.rumor.kind,
                     replyTo: event.replyTo,
                     emoji: event.emoji,

@@ -291,6 +291,15 @@ client.on('community_message', async (message) => {
   }
 });
 
+// Attachments (screenshots, GIFs, files) ride as NIP-92 imeta tags, each with
+// its own AES-256-GCM key; download() fetches, decrypts and hash-checks one.
+client.on('community_message', async (message) => {
+  for (const attachment of message.attachments) {
+    const bytes = await message.download(attachment, { maxBytes: 10 * 1024 * 1024 });
+    // attachment.mimeType, attachment.name, attachment.width/height
+  }
+});
+
 // Channels by id or name.
 const { id } = await client.sendCommunityMessage(communityId, 'general', 'hello');
 await client.editCommunityMessage(communityId, 'general', id, 'hello (edited)');
