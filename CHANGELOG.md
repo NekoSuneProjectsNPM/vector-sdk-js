@@ -11,6 +11,11 @@ changed in each version.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-27
+
+Bot accounts: creating one, storing it safely, and the things a bot needs an
+identity for.
+
 ### Added
 
 - **Bot accounts.** `generateAccount()` mints a Nostr keypair and returns it in
@@ -222,7 +227,8 @@ Never tagged or published; superseded by 1.1.0.
   metadata builders, AES-256-GCM file encryption, NIP-96 upload, and the
   `VectorBotClient` / `VectorBot` / `Channel` surface, with a demo script.
 
-[unreleased]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.1.1...HEAD
+[unreleased]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.0.4...v1.1.0
 [1.0.5]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.0.4...v1.0.5
