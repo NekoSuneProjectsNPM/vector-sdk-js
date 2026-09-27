@@ -227,6 +227,35 @@ client.on('invite', ({ invite, senderPubkey, expired }) => {
 await client.forwardInvite('npub1…', invite.communityId);
 ```
 
+### Accepting, listing and leaving
+
+```ts
+// Accept: keeps the access key, epoch and channel keys the bundle vended.
+await client.acceptInvite(invite.communityId);
+
+// discord.js-shaped, so this should look familiar:
+const communities = await client.communities.fetch();
+console.log(`In ${communities.size} communities`);
+for (const community of communities.toArray()) {
+  console.log(`${community.name} — ${community.channels.length} channels`);
+}
+
+const one = client.communities.get(id);
+await one.leave();              // or: client.communities.leave(id)
+```
+
+From the terminal: `vector-bot community list` and `vector-bot community leave <id>`.
+
+Repeat invites to the same community collapse to a single entry — the
+longest-lived one wins, since an older wrap can be the one with life left in it.
+`clearInvites()` drops held invites and `pruneInvites()` drops only expired ones.
+
+> **Accepting records membership; it does not yet make the bot a participant.**
+> Announcing the join and reading or posting in a channel ride the Concord v2
+> stream layer, which this package does not implement. A bot holds valid
+> credentials and is ready, but the community cannot see it and it cannot read
+> the room. `community.announced` stays `false` to mark exactly that.
+
 A bot can read and forward invites, but **cannot create them**. A bundle carries
 live key material for the community, which only a member holding that
 community's state can produce — and that state lives in `vector-core`. The

@@ -13,7 +13,7 @@
   "scripts": {
     "build": "tsc",
     "prepack": "npm run build",
-    "test": "npm run build && node tests/bot-interface.parity.mjs && node tests/identity.test.mjs"
+    "test": "npm run build && node tests/bot-interface.parity.mjs && node tests/giftwrap.test.mjs && node tests/identity.test.mjs"
   },
   "repository": {
     "type": "git",

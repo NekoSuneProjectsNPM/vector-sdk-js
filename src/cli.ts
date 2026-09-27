@@ -22,6 +22,7 @@ import {
 } from './identity.js';
 import { VectorBot } from './bot.js';
 import { Contacts } from './contacts.js';
+import { CommunityManager, CommunityStore } from './communities.js';
 
 const DEFAULT_RELAYS = [
   'wss://jskitty.cat/nostr',
@@ -275,6 +276,65 @@ async function cmdFriend(options: Options): Promise<number> {
   return 1;
 }
 
+function communitiesFile(options: Options): string {
+  return (
+    flagString(options, 'communities') ??
+    process.env.VECTOR_COMMUNITIES_FILE ??
+    path.join(process.cwd(), 'vector-bot-communities.json')
+  );
+}
+
+async function cmdCommunity(options: Options): Promise<number> {
+  const [action, target] = options.positional;
+  // Reading and leaving are local — the store is the record — so neither needs
+  // a relay connection.
+  const manager = new CommunityManager(new CommunityStore(communitiesFile(options)));
+  const cache = await manager.fetch();
+
+  if (action === 'list' || !action) {
+    if (cache.size === 0) {
+      console.log('Not in any communities yet.');
+      console.log('Accept an invite from your bot code with client.acceptInvite(id).');
+      return 0;
+    }
+    console.log(`In ${cache.size} ${cache.size === 1 ? 'community' : 'communities'}:`);
+    for (const community of cache.toArray()) {
+      const keyed = community.channels.filter((c) => c.key).length;
+      console.log('');
+      console.log(`  ${community.name}`);
+      console.log(`    id        : ${community.id}`);
+      console.log(`    protocol  : ${community.protocol}   epoch: ${community.epoch}`);
+      console.log(`    channels  : ${community.channels.length} (${keyed} with keys)`);
+      console.log(`    relays    : ${community.relays.join(', ') || 'none'}`);
+      console.log(`    joined    : ${community.joinedAt.toISOString()}`);
+      console.log(
+        `    announced : ${community.announced ? 'yes' : 'no — the community cannot see this bot yet'}`,
+      );
+    }
+    console.log('');
+    return 0;
+  }
+
+  if (action === 'leave') {
+    if (!target) {
+      console.error('Usage: vector-bot community leave <community-id>');
+      return 1;
+    }
+    const community = await manager.resolve(target);
+    if (!community) {
+      console.error(`Not in community ${target}.`);
+      return 1;
+    }
+    const name = community.name;
+    await manager.leave(target);
+    console.log(`Left ${name}. Its keys have been discarded.`);
+    return 0;
+  }
+
+  console.error(`Unknown community action: ${action}. Use list or leave.`);
+  return 1;
+}
+
 function usage(): void {
   console.log(`
 vector-bot — create and run a Vector bot account
@@ -296,12 +356,16 @@ COMMANDS
 
   publish-profile        Publish the kind-0 profile and kind-10050 inbox relays
   send <npub> <message…> Send a direct message
+  community list         Show every community the bot is in
+  community leave <id>   Leave a community and discard its keys
+
   friend list            Show everyone the bot follows
   friend add <npub>      Follow someone            [--petname "name"]
   friend remove <npub>   Unfollow someone
 
 COMMON OPTIONS
   --file <path>          Account file (default: ./${DEFAULT_ACCOUNT_FILE})
+  --communities <path>   Communities file (default: ./vector-bot-communities.json)
   --nsec <nsec1…>        Use this key instead of an account file
   --relays "a,b,c"       Relays to use (default: Vector's)
   --name, --display-name, --about, --picture, --banner, --nip05, --lud16
@@ -323,6 +387,7 @@ ENVIRONMENT
 EXAMPLES
   vector-bot create --mnemonic --publish
   vector-bot show
+  vector-bot community list
   vector-bot friend add npub1… --petname "owner"
   vector-bot send npub1… "hello from my bot"
 
@@ -352,6 +417,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
         return await cmdSend(options);
       case 'friend':
         return await cmdFriend(options);
+      case 'community':
+      case 'communities':
+        return await cmdCommunity(options);
       default:
         console.error(`Unknown command: ${command}`);
         usage();

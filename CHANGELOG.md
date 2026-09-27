@@ -14,7 +14,40 @@ changed in each version.
 ## [1.2.0] - 2026-09-27
 
 Bot accounts: creating one, storing it safely, and the things a bot needs an
-identity for.
+identity for. Also closes a sender-spoofing hole present in every earlier
+release.
+
+### Security
+
+- **Incoming messages were not authenticated, so any sender could impersonate
+  any account.** A NIP-59 rumor is unsigned — the signature lives on the kind-13
+  seal — but `nostr-tools`' `unwrapEvent` verifies neither the seal's signature
+  nor that the rumor's `pubkey` agrees with who signed it. The client trusted
+  `rumor.pubkey` for every message, command and reply, so anyone could seal a
+  rumor attributed to someone else and have a bot act on it as that person,
+  including whoever the bot trusts for privileged commands.
+
+  `unwrapGiftWrap()` replaces it: Schnorr-verify the seal, require the rumor to
+  name the same author, and re-derive the rumor id so a sender cannot point
+  replies, reactions or deletions at an event they did not write. It throws
+  rather than returning null — a wrap failing these checks is a forgery attempt,
+  never an ordinary message. This is the check `vector-core` calls mandatory:
+  the seal's npub "is the only proof of who invited".
+
+  Affects every release before 1.2.0. Bots authorizing on sender should treat
+  prior traffic as unauthenticated.
+
+### Fixed
+
+- **Community invites from current Vector clients were invisible.** Invites were
+  read as kind 3304, the *v1* bundle; a modern client sends a Concord v2 Direct
+  Invite, **kind 3313**, in a different wire-frozen shape (`community_root` /
+  `root_epoch`, not `server_root_key` / `server_root_epoch`). Both generations
+  are now read, with the protocol reported as `invite.protocol`, and forwarding
+  preserves the issuing kind. Verified against five live invites on
+  `wss://jskitty.cat/nostr`.
+- A v2 bundle states its own expiry in milliseconds, which is used when the
+  gift wrap carries no NIP-40 tag — previously such an invite looked permanent.
 
 ### Added
 
@@ -52,6 +85,24 @@ identity for.
   `vector_core::community::invite`.
 - **`channel.sendRumor()`** gift-wraps and sends a rumor you built yourself, for
   event kinds with no dedicated method.
+- **Accepting invites.** `client.acceptInvite(id)` keeps what the bundle vended
+  — the base access key, its epoch and any channel keys — in a communities file
+  written owner-only, since those are credentials. Re-accepting replaces the
+  entry, which is how a bot picks up rotated keys. An expired invite is refused:
+  past its deadline the preview still renders but the keys are stale.
+- **Communities, discord.js-shaped.** `client.communities` is a manager with
+  `.fetch()`, `.cache`, `.get(id)`, `.resolve(id)` and `.leave(id)`; each
+  `Community` has `.id`, `.name`, `.channels`, `.relays`, `.joinedAt` and
+  `.leave()`. The cache fills on `fetch()`, as in discord.js. `vector-bot
+  community list` and `community leave <id>` do the same from the terminal.
+- **Invites no longer pile up.** Repeat invites to the same community collapse
+  to one entry, and the longest-lived wins rather than merely the last seen — an
+  older wrap can be the one with life left in it. `clearInvites()` drops held
+  invites, `pruneInvites()` drops only expired ones, and accepting removes the
+  invite it consumed. Five real invites on the wire now present as one.
+- Concord v2 kind constants: `COMMUNITY_DIRECT_INVITE` (3313),
+  `COMMUNITY_SNAPSHOT` (3312), `COMMUNITY_COMMENT`, the ephemeral typing kind and
+  the public invite bundle kind.
 
 ## [1.1.1] - 2026-09-23
 
